@@ -1,0 +1,23 @@
+[package]
+name = "rpcutil"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+doctest = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+futures = "0"
+http = "1"
+hyper-util = "0"
+rand = "0"
+rustls-pemfile = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+tonic = { version = "0", features = ["tls"] }
+tower = { version = "0", features = ["util"] }
+x509-parser = "0"

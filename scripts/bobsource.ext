@@ -1,0 +1,2 @@
+basicConstraints=critical,CA:false
+extendedKeyUsage = clientAuth

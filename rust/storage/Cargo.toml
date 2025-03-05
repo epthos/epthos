@@ -1,0 +1,28 @@
+[package]
+name = "storage"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+crypto = {path = "../crypto"}
+layout_proto = {path = "../layout_proto"}
+
+anyhow = "1"
+bytes = "1"
+filetime = "0"
+futures = "0"
+hex = "0"
+prost = "0"
+rayon = "1"
+ring = "0"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "tracing"] }
+tracing = "0"
+
+[dev-dependencies]  
+tempfile = "3"
+

@@ -1,0 +1,29 @@
+[workspace]
+
+members = [
+    "broker",
+    "broker_client",
+    "broker_proto",
+    "cli",
+    "constants",
+    "crypto",
+    "data_proto",
+    "experiments",
+    "layout_proto",
+    "netutil",
+    "platform",
+    "rpcutil",
+    "settings",
+    "source",
+    "source_settings",
+    "sink",
+    "sink_client", 
+    "sink_proto", 
+    "sink_settings", 
+    "storage", 
+    "testcerts", 
+]
+resolver = "2"
+
+[profile.release]
+lto = true

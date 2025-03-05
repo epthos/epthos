@@ -1,0 +1,24 @@
+[package]
+name = "sink"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sink"
+path = "src/main.rs"
+
+[dependencies]
+broker_client = {path = "../broker_client" }
+netutil = {path = "../netutil"}
+rpcutil = {path = "../rpcutil"}
+settings = {path = "../settings"}
+sink_proto = { path = "../sink_proto" }
+sink_settings = { path = "../sink_settings" }
+
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tonic = { version = "0", features = ["tls"] }
+tracing = "0"
+

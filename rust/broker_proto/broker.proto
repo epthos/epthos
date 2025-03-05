@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package epthos.broker;
+
+service Broker {
+    // Peers periodically indicate their presence, and receive
+    // information about how to connect to their remote ends.
+    rpc Checkin(CheckinRequest) returns (CheckinReply);
+}
+
+// Identity is provided via gRPC auth. The rest is metadata about
+// the sender's version, etc.
+message CheckinRequest {
+    repeated string listening_on = 1;
+}
+
+message CheckinReply {
+    // Requested delay (in seconds) until the next checkin.
+    int32 next_checkin_s = 1;
+
+    repeated SinkInfo sink = 2;
+}
+
+// Last known information about a Sink.
+message SinkInfo {
+    string id = 1;
+    repeated string listening_on = 2;
+}

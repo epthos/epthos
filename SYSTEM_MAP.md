@@ -1,0 +1,34 @@
+# Overall structure
+
+Rust packages are flat for simplicity. Related packages share a prefix. 
+
+- ./docker: build & package the broker.
+- ./scripts: generate test certificates.
+
+- ./rust/data_proto: in-memory data representation of content.
+- ./rust/layout_proto: on-disk representation of content.
+
+- ./rust/platform: platform-specific logic.
+- ./rust/crypto: encryption/decryption of content.
+- ./rust/netutil: helper to identify the local host's IP, etc. Merge into platform?
+- ./rust/rpcutil: helpers (exponential backoff, testing) for client/server code.
+- ./rust/constants: project-wide constants (names, etc)
+
+- ./rust/cli
+
+- ./rust/sink
+- ./rust/sink_proto
+- ./rust/sink_client
+- ./rust/sink_settings
+
+- ./rust/source
+- ./rust/source_settings
+- ./rust/storage: source-related filesystem handling.
+
+- ./rust/settings: parsing, writing & validation of settings.
+
+- ./rust/broker
+- ./rust/broker_client
+- ./rust/broker_proto
+
+- ./rust/experiments

@@ -1,0 +1,23 @@
+[package]
+name = "netutil"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+doctest = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+local-ip-address = "0"
+tracing = "0"
+anyhow = "1"
+thiserror = "2"
+
+[dependencies.windows-sys]
+version = "0"
+features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+]

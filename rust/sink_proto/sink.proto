@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package epthos.sink;
+
+service Sink {
+    rpc Store(StoreRequest) returns (StoreReply);
+}
+
+message StoreRequest {
+    bytes data = 1;
+}
+
+message StoreReply {}

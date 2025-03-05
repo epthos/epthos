@@ -1,0 +1,4 @@
+# cargo bench generates outputs in this directory.
+/crypto/target/
+# Top-level binaries
+/target/

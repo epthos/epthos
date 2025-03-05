@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package epthos.data;
+
+message BlockRef { bytes block_id = 1; }
+
+// This is visible to the sink, and helps with GC, can be
+// sent back to the source during disaster recovery, etc.
+message VerifiedDescriptor {
+	// Files (based on their path) have a unique file_id
+	// per source, as RAND(48).
+	bytes file_id = 1;
+
+	// Each file goes through monotonic versions as they are
+	// modified. The version is a concept defined by the
+	// source based on how frequently it notices changes.
+	// Note that we don't reset the version when the epoch
+	// changes.
+	uint32 version = 2;
+
+	// Very large files require mutiple Descriptor blocks.
+	// Each block will contain the file_id and version from
+	// above. The metadata field is only provided for block at
+	// index 0.
+	uint32 index = 4;
+	uint32 total = 5;
+
+	// Links to the actual content chunks.
+	repeated BlockRef content = 6;
+}
+
+// This is not visible to the sink, and is passed encrypted.
+message EncryptedDescriptor {
+	string filename = 1;
+	uint64 size = 2;
+}
+
+message VerifiedBlockPart {
+	// File this block is part of.
+	bytes file_id = 1;
+	// 96 bit id for the block, as RAND(96)
+	bytes block_id = 2;
+}
+
+message EncryptedChunk {
+	// Cleartext of the chunk.
+	bytes chunk = 1;
+	// Optional padding, typically for the last chunk
+	// to hide its true size.
+	bytes padding = 2;
+}

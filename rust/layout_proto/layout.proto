@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package epthos.layout;
+
+message Block {
+    bytes protected = 1;
+    bytes verified = 2;
+}
+
+message Descriptor {
+    bytes protected = 1;
+    bytes verified = 2;
+}

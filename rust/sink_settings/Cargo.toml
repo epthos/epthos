@@ -1,0 +1,23 @@
+[package]
+name = "sink_settings"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+broker_client = {path = "../broker_client" }
+constants = {path = "../constants" }
+settings = {path = "../settings"}
+
+anyhow = "1"
+serde = "1"
+strum = "0"
+strum_macros = "0"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
