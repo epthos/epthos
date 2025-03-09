@@ -6,9 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use windows::{
-    core::{Owned, HRESULT, PCSTR, PCWSTR, PSTR},
+    core::{Owned, BOOL, HRESULT, PCSTR, PCWSTR, PSTR},
     Win32::{
-        Foundation::{BOOL, HANDLE, HLOCAL},
+        Foundation::{HANDLE, HLOCAL},
         Security::{
             Authorization::{
                 ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorA,
@@ -130,7 +130,7 @@ impl TryFrom<&LocalPathRepr> for PathBuf {
         }
         let mut wide: Vec<u16> = Vec::with_capacity(bytes.len() / 2);
         for pair in bytes.chunks_exact(2) {
-            wide.push((pair[0] as u16) | ((pair[1] as u16) >> 8));
+            wide.push((pair[0] as u16) | ((pair[1] as u16) << 8));
         }
         let str = std::ffi::OsString::from_wide(&wide);
         Ok(PathBuf::from(str))

@@ -35,3 +35,20 @@ impl AsRef<[u8]> for LocalPathRepr {
         &self.0
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::path::PathBuf;
+
+    use super::LocalPathRepr;
+
+    #[test]
+    fn non_ascii() -> anyhow::Result<()> {
+        let s = PathBuf::from("よつばと!");
+        let l: LocalPathRepr = s.clone().into();
+        let sprime: PathBuf = l.try_into()?;
+
+        assert_eq!(s, sprime);
+        Ok(())
+    }
+}
