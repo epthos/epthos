@@ -5,13 +5,14 @@
 use anyhow::{anyhow, Context};
 use crypto::model::FileId;
 use platform::LocalPathRepr;
-use rusqlite::OptionalExtension;
+use rusqlite::{types, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
 use std::{
     collections::HashMap,
     ffi::OsString,
+    num::TryFromIntError,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, SystemTimeError},
 };
 use tracing::instrument;
 
@@ -22,9 +23,6 @@ pub trait Filestore {
     type Scanner<'a>: Scanner
     where
         Self: 'a;
-    type Hasher<'a>: Hasher
-    where
-        Self: 'a;
 
     // Define the roots of the filesystem under scrutiny.
     fn set_roots(&mut self, roots: &[&Path]) -> anyhow::Result<bool>;
@@ -33,7 +31,14 @@ pub trait Filestore {
     // Get the next directory to analyze, if it's due.
     fn tree_scan_next(&mut self) -> anyhow::Result<ScanNext<Self::Scanner<'_>>>;
     // Get the next file to analyze, if any is due.
-    fn hash_next(&mut self, now: SystemTime) -> anyhow::Result<HashNext<Self::Hasher<'_>>>;
+    fn hash_next(&mut self, now: SystemTime) -> anyhow::Result<HashNext>;
+    // Update a file's hash.
+    fn hash_update(
+        &mut self,
+        file: PathBuf,
+        next: SystemTime,
+        update: HashUpdate,
+    ) -> anyhow::Result<()>;
 }
 
 /// Scanner defines how the content of a specific directory is being updated.
@@ -54,11 +59,6 @@ pub trait Scanner {
     fn error(self, error: std::io::Error) -> anyhow::Result<()>;
 }
 
-/// Hasher defines how the hash of a specific file is being updated.
-pub trait Hasher {
-    fn update(self, update: HashUpdate, next: SystemTime) -> anyhow::Result<()>;
-}
-
 /// What should be scanned next?
 #[derive(Debug, PartialEq)]
 pub enum ScanNext<U: Scanner> {
@@ -66,24 +66,28 @@ pub enum ScanNext<U: Scanner> {
     Done(SystemTime), // Scanning complete.
 }
 
+// TODO: move to a shared module.
+pub type FileSize = u64;
+pub type ModificationTime = SystemTime;
+
 /// What is the next update to the directory?
 #[derive(Debug)]
 pub enum ScanUpdate {
-    File(OsString),
+    File(OsString, FileSize, ModificationTime),
     Directory(OsString),
 }
 
 /// What should be hashed next?
 #[derive(Debug, PartialEq)]
-pub enum HashNext<H: Hasher> {
-    Next(PathBuf, H),
+pub enum HashNext {
+    Next(PathBuf),
     Done(SystemTime),
 }
 
 /// Represents the file hash update.
 #[derive(Debug)]
 pub enum HashUpdate {
-    File,
+    Hash(ring::digest::Digest),
     Unreadable(std::io::Error),
 }
 
@@ -101,12 +105,6 @@ pub struct UpdaterImpl<'a> {
     tx: rusqlite::Transaction<'a>,
     dir: Directory,
     aim: i64,
-}
-
-#[derive(Debug)]
-pub struct HasherImpl<'a> {
-    tx: rusqlite::Transaction<'a>,
-    file: File,
 }
 
 impl std::fmt::Debug for UpdaterImpl<'_> {
@@ -194,8 +192,15 @@ CREATE TABLE FileId (
     -- Last scan gen this file was seen.
     tree_gen INTEGER NOT NULL,
 
-    -- Next time the file was hashed, in seconds since epoch.
-    next_hash INTEGER NOT NULL,
+    -- Next time the file will be hashed, in seconds since epoch.
+    next_hash_s INTEGER NOT NULL,
+
+    -- Filesystem-level fingerprint of the file. 0 if unknown at this time,
+    -- typically if access_error is set.
+    file_size            INTEGER NOT NULL,
+    modification_time_us INTEGER NOT NULL,
+
+    hash BLOB,
 
     access_error TEXT
 ) STRICT, WITHOUT ROWID;
@@ -222,7 +227,6 @@ const FILE_NEXT_DELAY: Duration = Duration::from_secs(3600);
 
 impl Filestore for Connection {
     type Scanner<'a> = UpdaterImpl<'a>;
-    type Hasher<'a> = HasherImpl<'a>;
 
     /// Set the roots to the provided list. This supersedes the roots completely, which
     /// can impact which files will be backed up in the future.
@@ -303,7 +307,14 @@ impl Filestore for Connection {
         let next = get_timestamp_setting(&txn, SETTING_NEXT_RUN)?.unwrap_or(SystemTime::UNIX_EPOCH);
         let result = txn
             .query_row(
-                "SELECT id, path, root, access_error FROM Directory WHERE tree_gen < tree_aim AND tree_aim = ?1 ORDER BY path LIMIT 1",
+                r#"
+                SELECT
+                  id, path, root, access_error
+                FROM
+                  Directory
+                WHERE
+                  tree_gen < tree_aim AND tree_aim = ?1
+                ORDER BY path LIMIT 1"#,
                 (aim,),
                 |row| {
                     Ok(Directory {
@@ -333,7 +344,7 @@ impl Filestore for Connection {
         Ok(candidate)
     }
 
-    fn hash_next(&mut self, now: SystemTime) -> anyhow::Result<HashNext<HasherImpl>> {
+    fn hash_next(&mut self, now: SystemTime) -> anyhow::Result<HashNext> {
         let txn = self.conn.transaction()?;
         let aim = get_int_setting(&txn, SETTING_TREE_GEN)?.unwrap_or(0);
         // We only hash files that were found during a recent scan: deleted files will remain in the
@@ -342,13 +353,12 @@ impl Filestore for Connection {
         // not from this code path.
         let result = txn
             .query_row(
-                "SELECT id, path, next_hash FROM FileId WHERE tree_gen >= ?1 ORDER BY next_hash LIMIT 1",
+                "SELECT id, path, next_hash_s FROM FileId WHERE tree_gen >= ?1 ORDER BY next_hash_s LIMIT 1",
                 (
                     aim - 1,
                 ),
                 |row| {
-                    let next : u64 = row.get(2)?;
-                    let next = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(next)).context("invalid next_hash").map_err(|e: anyhow::Error| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                    let next = seconds_to_time(row.get(2)?)?;
                     Ok((File {
                         id: to_file_id(row.get(0)?)?,
                         path: to_path(row.get(1)?)?,
@@ -361,13 +371,7 @@ impl Filestore for Connection {
         let candidate = match result {
             Some((candidate, next)) => {
                 if next <= now {
-                    HashNext::Next(
-                        candidate.path.clone(),
-                        HasherImpl {
-                            tx: self.conn.transaction()?,
-                            file: candidate,
-                        },
-                    )
+                    HashNext::Next(candidate.path.clone())
                 } else {
                     HashNext::Done(next)
                 }
@@ -379,34 +383,98 @@ impl Filestore for Connection {
         };
         Ok(candidate)
     }
-}
 
-impl<'a> Hasher for HasherImpl<'a> {
-    fn update(self, update: HashUpdate, next: SystemTime) -> anyhow::Result<()> {
+    fn hash_update(
+        &mut self,
+        file: PathBuf,
+        next: SystemTime,
+        update: HashUpdate,
+    ) -> anyhow::Result<()> {
+        let file_repr: LocalPathRepr = file.clone().into();
+        let tx = self.conn.transaction()?;
+        let mut args: Option<Vec<types::Value>> = None;
         match update {
-            HashUpdate::File => {
-                self.tx.execute(
-                    "UPDATE FileId SET next_hash = ?1, access_error = NULL WHERE id = ?2",
-                    (
-                        next.duration_since(SystemTime::UNIX_EPOCH)?.as_secs(),
-                        self.file.id.as_bytes(),
-                    ),
+            HashUpdate::Hash(digest) => {
+                let changed = tx.execute(
+                    "UPDATE FileId SET next_hash_s = ?1, access_error = NULL, hash = ?3 WHERE path = ?2",
+                    (time_to_seconds(&next)?, file_repr.as_ref(), digest.as_ref()),
                 )?;
+                if changed == 0 {
+                    args = Some(vec![
+                        types::Value::Blob(file_repr.as_ref().to_vec()),
+                        types::Value::Integer(time_to_usec(&next)? as i64),
+                        types::Value::Blob(digest.as_ref().to_vec()),
+                        types::Value::Null,
+                    ]);
+                }
             }
             HashUpdate::Unreadable(error) => {
-                self.tx.execute(
-                    "UPDATE FileId SET next_hash = ?1, access_error = ?3 WHERE id = ?2",
+                let changed = tx.execute(
+                    "UPDATE FileId SET next_hash_s = ?1, access_error = ?3, hash = NULL WHERE path = ?2",
                     (
-                        next.duration_since(SystemTime::UNIX_EPOCH)?.as_secs(),
-                        self.file.id.as_bytes(),
+                        time_to_seconds(&next)?,
+                        file_repr.as_ref(),
                         format!("{:?}", error),
                     ),
                 )?;
+                if changed == 0 {
+                    args = Some(vec![
+                        types::Value::Blob(file_repr.as_ref().to_vec()),
+                        types::Value::Integer(time_to_usec(&next)? as i64),
+                        types::Value::Null,
+                        types::Value::Text(format!("{:?}", error)),
+                    ]);
+                }
             }
         }
-        self.tx.commit()?;
+        if let Some(args) = args {
+            let mut stmt = tx.prepare(
+                r#"
+                  INSERT INTO FileId(
+                    id, path, tree_gen, next_hash_s,
+                    file_size, modification_time_us,
+                    hash, access_error)
+                  VALUES (
+                    ?1, ?2, 0, ?3,
+                    0, 0,
+                    ?4, ?5
+                  )
+                  "#,
+            )?;
+            file_insert(&mut stmt, args, self.rand.clone())?;
+        }
+        tx.commit()?;
         Ok(())
     }
+}
+
+fn file_insert(
+    insert_stmt: &mut rusqlite::Statement,
+    insert_args: Vec<types::Value>,
+    rand: crypto::SharedRandom,
+) -> anyhow::Result<()> {
+    // INSERT can fail if there is a collision on the generated FileId. This
+    // should be incredibly rare, but is also something we can trivially handle
+    // by retrying (until we have a significant chunk of 2^48 files...)
+    for attempt in 1..3 {
+        let rand = rand.generate_file_id()?;
+        let iter = std::iter::once(types::Value::Blob(rand.as_bytes().to_vec()));
+        let extra = insert_args.clone().into_iter();
+        let result = insert_stmt.execute(rusqlite::params_from_iter(iter.chain(extra)));
+        match result {
+            Ok(_) => break,
+            Err(err) => {
+                if err
+                    .sqlite_error_code()
+                    .is_none_or(|code| code != rusqlite::ErrorCode::ConstraintViolation)
+                {
+                    Err(err)? // re-thrown unknown problems
+                }
+                tracing::warn!("Collision while generating new FileId, attempt {}", attempt,);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl<'a> Scanner for UpdaterImpl<'a> {
@@ -419,37 +487,33 @@ impl<'a> Scanner for UpdaterImpl<'a> {
                     (self.aim, path.as_ref()),
                 )?;
                 if count == 0 {
-                    self.tx.execute("INSERT INTO Directory(path, root, tree_aim, tree_gen, complete) VALUES (?1, FALSE, ?2, 0, 0)", (path.as_ref(), self.aim))?;
+                    self.tx.execute(
+                        "INSERT INTO Directory(path, root, tree_aim, tree_gen, complete) VALUES (?1, FALSE, ?2, 0, 0)",
+                        (path.as_ref(), self.aim))?;
                 }
             }
-            ScanUpdate::File(file) => {
+            ScanUpdate::File(file, file_size, modification_time) => {
                 let path: LocalPathRepr = self.dir.path.join(file).into();
                 let count = self.tx.execute(
-                    "UPDATE FileId SET tree_gen = ?1 WHERE path = ?2",
-                    (self.aim, path.as_ref()),
+                    "UPDATE FileId SET tree_gen = ?1, file_size = ?3, modification_time_us = ?4 WHERE path = ?2",
+                    (self.aim, path.as_ref(), file_size, time_to_usec(modification_time)?),
                 )?;
                 if count == 0 {
-                    // INSERT can fail if there is a collision on the generated FileId. This
-                    // should be incredibly rare, but is also something we can trivially handle
-                    // by retrying (until we have a significant chunk of 2^48 files...)
-                    for attempt in 1..3 {
-                        if let Err(e) = self.tx.execute(
-                                "INSERT INTO FileId(id, path, tree_gen, next_hash) VALUES (?1, ?2, ?3, 0)",
-                                (self.rand.generate_file_id()?.as_bytes(), path.as_ref(), self.aim),
-                            ) {
-                                if e.sqlite_error_code().is_none_or(|code| {
-                                    code != rusqlite::ErrorCode::ConstraintViolation
-                                }) {
-                                    Err(e)? // re-thrown unknown problems
-                                }
-                                tracing::warn!(
-                                    "Collision while generating new FileId, attempt {}",
-                                    attempt,
-                                );
-                            } else {
-                                break;
-                            }
-                    }
+                    let mut insert_stmt = self.tx.prepare(
+                        r#"INSERT INTO
+                         FileId(id, path, tree_gen, next_hash_s, file_size, modification_time_us)
+                       VALUES (?1, ?2, ?3, 0, ?4, ?5)"#,
+                    )?;
+                    file_insert(
+                        &mut insert_stmt,
+                        vec![
+                            types::Value::Blob(path.as_ref().to_vec()),
+                            types::Value::Integer(self.aim),
+                            types::Value::Integer(*file_size as i64),
+                            types::Value::Integer(time_to_usec(modification_time)? as i64),
+                        ],
+                        self.rand.clone(),
+                    )?;
                 }
             }
         };
@@ -602,11 +666,44 @@ fn to_file_id(data: Vec<u8>) -> rusqlite::Result<FileId> {
     Ok(id)
 }
 
+fn seconds_to_time(ts: u64) -> Result<SystemTime, rusqlite::Error> {
+    SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(ts))
+        .context("invalid second delta")
+        .map_err(|e: anyhow::Error| rusqlite::Error::ToSqlConversionFailure(e.into()))
+}
+
+fn time_to_seconds(ts: &SystemTime) -> Result<u64, rusqlite::Error> {
+    Ok(ts
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e: SystemTimeError| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+        .as_secs())
+}
+
+fn usec_to_time(ts: u64) -> Result<SystemTime, rusqlite::Error> {
+    SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_micros(ts))
+        .context("invalid usec delta")
+        .map_err(|e: anyhow::Error| rusqlite::Error::ToSqlConversionFailure(e.into()))
+}
+
+fn time_to_usec(ts: &SystemTime) -> Result<u64, rusqlite::Error> {
+    let delta = ts
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e: SystemTimeError| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+        .as_micros();
+    let delta: u64 = delta
+        .try_into()
+        .map_err(|e: TryFromIntError| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+    Ok(delta)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use anyhow::bail;
     use crypto::model::FileId;
+    use ring::digest;
     use std::{
         collections::VecDeque,
         sync::{Arc, Mutex},
@@ -702,7 +799,7 @@ mod test {
         assert_eq!(dir, a);
 
         let f1: OsString = "f1".into();
-        updater.update(&ScanUpdate::File(f1))?;
+        updater.update(&ScanUpdate::File(f1, 100, usec_to_time(1000)?))?;
         updater.commit(true)?;
 
         // Now we progress.
@@ -732,11 +829,11 @@ mod test {
             vec![(a.into(), 1, 1), (b.into(), 1, 1), (b.join("e"), 1, 1)]
         );
 
-        let got: Vec<(PathBuf, u64)> = fileid_dump(cnx.conn())?
+        let got: Vec<(PathBuf, u64, u64, SystemTime)> = fileid_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.gen))
+            .map(|d| (d.path, d.gen, d.file_size, d.modification))
             .collect();
-        assert_eq!(got, vec![(a.join("f1"), 1)]);
+        assert_eq!(got, vec![(a.join("f1"), 1, 100, usec_to_time(1000)?)]);
         Ok(())
     }
 
@@ -750,8 +847,8 @@ mod test {
         cnx.tree_scan_start(next_time)?;
 
         let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
-        updater.update(&ScanUpdate::File("f1".into()))?;
-        updater.update(&ScanUpdate::File("f2".into()))?;
+        updater.update(&ScanUpdate::File("f1".into(), 1, usec_to_time(100)?))?;
+        updater.update(&ScanUpdate::File("f2".into(), 2, usec_to_time(200)?))?;
         updater.update(&ScanUpdate::Directory("d1".into()))?;
         updater.update(&ScanUpdate::Directory("d2".into()))?;
         updater.commit(true)?;
@@ -766,8 +863,8 @@ mod test {
         cnx.tree_scan_start(next_time)?;
 
         let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
-        updater.update(&ScanUpdate::File("f1".into()))?;
-        updater.update(&ScanUpdate::File("f3".into()))?;
+        updater.update(&ScanUpdate::File("f1".into(), 3, usec_to_time(300)?))?;
+        updater.update(&ScanUpdate::File("f3".into(), 4, usec_to_time(400)?))?;
         updater.update(&ScanUpdate::Directory("d1".into()))?;
         updater.update(&ScanUpdate::Directory("d3".into()))?;
         updater.commit(true)?;
@@ -792,13 +889,17 @@ mod test {
             ]
         );
 
-        let got: Vec<(PathBuf, u64)> = fileid_dump(cnx.conn())?
+        let got: Vec<(PathBuf, u64, u64, SystemTime)> = fileid_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.gen))
+            .map(|d| (d.path, d.gen, d.file_size, d.modification))
             .collect();
         assert_eq!(
             got,
-            vec![(a.join("f1"), 2), (a.join("f2"), 1), (a.join("f3"), 2),]
+            vec![
+                (a.join("f1"), 2, 3, usec_to_time(300)?),
+                (a.join("f2"), 1, 2, usec_to_time(200)?),
+                (a.join("f3"), 2, 4, usec_to_time(400)?),
+            ]
         );
 
         Ok(())
@@ -813,7 +914,7 @@ mod test {
         cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
         {
             let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
-            updater.update(&ScanUpdate::File("b".into()))?;
+            updater.update(&ScanUpdate::File("b".into(), 1, usec_to_time(1)?))?;
         }
         let got: Vec<PathBuf> = fileid_dump(cnx.conn())?
             .into_iter()
@@ -880,8 +981,8 @@ mod test {
         cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
 
         let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
-        updater.update(&ScanUpdate::File("b".into()))?; // will get id 1.
-        updater.update(&ScanUpdate::File("c".into()))?; // will collide with 1 then get 2.
+        updater.update(&ScanUpdate::File("b".into(), 1, usec_to_time(1)?))?; // will get id 1.
+        updater.update(&ScanUpdate::File("c".into(), 1, usec_to_time(1)?))?; // will collide with 1 then get 2.
         updater.commit(true)?;
 
         let got: Vec<(PathBuf, FileId)> = fileid_dump(cnx.conn())?
@@ -907,7 +1008,7 @@ mod test {
 
         // Make a/b a file first.
         let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
-        updater.update(&ScanUpdate::File(b.clone()))?;
+        updater.update(&ScanUpdate::File(b.clone(), 1, usec_to_time(1)?))?;
         updater.commit(true)?;
 
         cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
@@ -930,7 +1031,7 @@ mod test {
         cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
 
         let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
-        updater.update(&ScanUpdate::File(b.clone()))?;
+        updater.update(&ScanUpdate::File(b.clone(), 1, usec_to_time(1)?))?;
         updater.commit(true)?;
 
         let got: Vec<(PathBuf, u64)> = fileid_dump(cnx.conn())?
@@ -970,18 +1071,21 @@ mod test {
         cnx.tree_scan_start(next_time)?;
 
         let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
-        updater.update(&ScanUpdate::File("f1".into()))?;
+        updater.update(&ScanUpdate::File("f1".into(), 1, usec_to_time(1)?))?;
         updater.commit(true)?;
 
         // From now on, file a/f1 is in the database, but with no hash yet.
-        let (file, hasher) = hasher_or(cnx.hash_next(now)?)?;
-        assert_eq!(file, a.join("f1"));
-        drop(hasher); // Intentionally don't advance.
-
-        let (file, hasher) = hasher_or(cnx.hash_next(now)?)?;
+        let file = hasher_or(cnx.hash_next(now)?)?;
         assert_eq!(file, a.join("f1"));
 
-        hasher.update(HashUpdate::File, now + delta)?;
+        let file = hasher_or(cnx.hash_next(now)?)?;
+        assert_eq!(file, a.join("f1"));
+
+        cnx.hash_update(
+            file,
+            now + delta,
+            HashUpdate::Hash(digest::digest(&digest::SHA256, b"boo")),
+        )?;
 
         // The next hash is scheduled for when the file above should be
         // checked again.
@@ -990,6 +1094,21 @@ mod test {
         };
         assert_eq!(next, now + delta);
 
+        Ok(())
+    }
+
+    #[test]
+    fn hash_next_unknown_file() -> anyhow::Result<()> {
+        let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+        let file: PathBuf = PathBuf::from("a");
+        let delta = Duration::from_secs(10);
+        let now = SystemTime::UNIX_EPOCH + delta;
+        // The watcher can trigger an update on files we haven't scanned yet.
+        cnx.hash_update(
+            file,
+            now + delta,
+            HashUpdate::Hash(digest::digest(&digest::SHA256, b"boo")),
+        )?;
         Ok(())
     }
 
@@ -1015,6 +1134,8 @@ mod test {
         id: FileId,
         path: PathBuf,
         gen: u64,
+        file_size: FileSize,
+        modification: SystemTime,
     }
 
     fn updater_or<U: Scanner>(next: ScanNext<U>) -> anyhow::Result<(PathBuf, U)> {
@@ -1024,10 +1145,10 @@ mod test {
         }
     }
 
-    fn hasher_or<H: Hasher>(next: HashNext<H>) -> anyhow::Result<(PathBuf, H)> {
+    fn hasher_or(next: HashNext) -> anyhow::Result<PathBuf> {
         match next {
             HashNext::Done(_) => bail!("no next file to hash"),
-            HashNext::Next(file, hasher) => Ok((file, hasher)),
+            HashNext::Next(file) => Ok(file),
         }
     }
 
@@ -1056,7 +1177,9 @@ mod test {
 
     fn fileid_dump(conn: &mut rusqlite::Connection) -> anyhow::Result<Vec<FullFileId>> {
         let mut result = vec![];
-        let mut stmt = conn.prepare("SELECT id, path, tree_gen FROM FileId ORDER BY path")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, path, tree_gen, file_size, modification_time_us FROM FileId ORDER BY path",
+        )?;
         for row in stmt
             .query_map((), |row| {
                 let id: Vec<u8> = row.get(0)?;
@@ -1064,6 +1187,8 @@ mod test {
                     id: to_fileid(&id)?,
                     path: to_path(row.get(1)?)?,
                     gen: row.get(2)?,
+                    file_size: row.get(3)?,
+                    modification: usec_to_time(row.get(4)?)?,
                 })
             })
             .context("Faild to list FileIds")?

@@ -6,7 +6,7 @@
 //  - scan should detect candidates for full hashing and accelerate their hashing.
 
 use crate::{
-    filestore::{self, Connection, Filestore, HashNext, HashUpdate, Hasher, Scanner},
+    filestore::{self, Connection, Filestore, HashNext, HashUpdate, Scanner},
     watcher,
 };
 use anyhow::{anyhow, Context};
@@ -38,7 +38,7 @@ pub enum Next {
 
 #[derive(Debug)]
 pub enum ScanUpdate {
-    File(OsString),
+    File(OsString, filestore::FileSize, filestore::ModificationTime),
     Directory(OsString),
     /// Total failure to list the content of the directory.
     Error(std::io::Error),
@@ -49,6 +49,7 @@ pub enum ScanUpdate {
 
 #[derive(Debug)]
 pub enum Update {
+    Hash(ring::digest::Digest),
     Unreadable(std::io::Error),
 }
 
@@ -186,26 +187,29 @@ impl<S: Filestore> PickerRunner<S> {
                 // Many possible cases to handle (starvation, etc)
                 if !self.pending.is_empty() {
                     let next = self.pending.pop_back().unwrap();
-                    tracing::info!("sending next({:?})", &next);
+                    tracing::debug!("hashing modified file {:?}", &next);
                     match next {
                         watcher::Update::File(file) => {
                             let _ = tx.send(Ok(Next::CheckFile(file))).await;
+                            next_tx = None;
                         }
-                        watcher::Update::Directory(_) => {
-                            continue;
-                        }
+                        watcher::Update::Directory(_) => {}
                     }
-                    next_tx = None;
                     continue;
                 }
                 // Second in priority order: files that haven't been hashed in a while.
                 match self.store.hash_next(now)? {
-                    HashNext::Next(file, hasher) => {
-                        tracing::info!("we should be hashing {:?} now", &file);
-                        hasher.update(HashUpdate::File, now + HASH_DELAY)?;
+                    HashNext::Next(file) => {
+                        tracing::debug!("hashing stale file {:?}", &file);
+                        let _ = tx.send(Ok(Next::CheckFile(file))).await;
+                        next_tx = None;
+                        continue;
                     }
                     HashNext::Done(delay) => {
-                        tracing::info!("no next file, waiting until {:?}", &delay);
+                        tracing::debug!(
+                            "no next file to hash, waiting until {:?}",
+                            isotime(delay.clone())
+                        );
                         scan_delay = Some(if let Some(previous) = scan_delay {
                             std::cmp::min(previous, delay)
                         } else {
@@ -220,7 +224,10 @@ impl<S: Filestore> PickerRunner<S> {
                         next_tx = None;
                     }
                     Ok(filestore::ScanNext::Done(delay)) => {
-                        tracing::info!("tree scan done, waiting until {:?}", &delay);
+                        tracing::info!(
+                            "tree scan done, waiting until {:?}",
+                            isotime(delay.clone())
+                        );
                         scan_delay = Some(if let Some(previous) = scan_delay {
                             std::cmp::min(previous, delay)
                         } else {
@@ -228,7 +235,7 @@ impl<S: Filestore> PickerRunner<S> {
                         });
                     }
                     Ok(filestore::ScanNext::Next(dir, updater)) => {
-                        tracing::debug!("sending next({:?})", &dir);
+                        tracing::debug!("scanning {:?}", &dir);
                         let (file_tx, mut file_rx) = mpsc::channel(1);
                         let next = Ok(Next::ScanDir(dir, file_tx));
                         // We can now fulfill the current "next()" call.
@@ -242,11 +249,15 @@ impl<S: Filestore> PickerRunner<S> {
                         let mut updater = Some(updater);
                         while let Some(update) = file_rx.recv().await {
                             match update {
-                                ScanUpdate::File(os_string) => {
+                                ScanUpdate::File(name, size, modification) => {
                                     let updater = updater
                                         .as_mut()
                                         .ok_or_else(|| anyhow!("update was already complete"))?;
-                                    updater.update(&filestore::ScanUpdate::File(os_string))?;
+                                    updater.update(&filestore::ScanUpdate::File(
+                                        name,
+                                        size,
+                                        modification,
+                                    ))?;
                                 }
                                 ScanUpdate::Directory(os_string) => {
                                     let updater = updater
@@ -298,8 +309,13 @@ impl<S: Filestore> PickerRunner<S> {
                                 next_tx = Some(tx);
                             }
                         }
-                        Some(PickerOp::Update(_path, _update, _tx)) => {
-                            // TODO
+                        Some(PickerOp::Update(path, update, tx)) => {
+                            let update = match update {
+                                Update::Hash(digest) => HashUpdate::Hash(digest),
+                                Update::Unreadable(error) => HashUpdate::Unreadable(error),
+                            };
+                            let result = self.store.hash_update(path, SystemTime::now() + HASH_DELAY, update);
+                            let _ = tx.send(result).await;
                         }
                     }
                 }
@@ -310,7 +326,7 @@ impl<S: Filestore> PickerRunner<S> {
                             break;
                         },
                         Some(update) => {
-                            tracing::info!("Receiver watcher: {:?}", update);
+                            tracing::debug!("Receiver watcher: {:?}", update);
                             self.pending.push_front(update);
                         },
                     }
@@ -336,6 +352,16 @@ impl<S: Filestore> PickerRunner<S> {
         }
         Ok(())
     }
+}
+
+fn isotime<T>(dt: T) -> anyhow::Result<String>
+where
+    T: Into<time::OffsetDateTime>,
+{
+    Ok(dt
+        .into()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .context("can't format timestamp")?)
 }
 
 #[cfg(test)]
@@ -681,7 +707,6 @@ mod test {
 
     impl Filestore for FakeStore {
         type Scanner<'a> = FakeUpdater;
-        type Hasher<'a> = FakeHasher;
 
         fn set_roots(&mut self, roots: &[&Path]) -> anyhow::Result<bool> {
             let mut state = self.state.lock().unwrap();
@@ -700,10 +725,7 @@ mod test {
             Ok(())
         }
 
-        fn hash_next(
-            &mut self,
-            now: SystemTime,
-        ) -> anyhow::Result<filestore::HashNext<Self::Hasher<'_>>> {
+        fn hash_next(&mut self, now: SystemTime) -> anyhow::Result<filestore::HashNext> {
             Ok(HashNext::Done(now + Duration::from_secs(10)))
         }
 
@@ -719,6 +741,15 @@ mod test {
                 Ok(filestore::ScanNext::Next(next, FakeUpdater {}))
             }
         }
+
+        fn hash_update(
+            &mut self,
+            _file: PathBuf,
+            _next: SystemTime,
+            _update: HashUpdate,
+        ) -> anyhow::Result<()> {
+            todo!()
+        }
     }
 
     struct FakeUpdater {}
@@ -732,12 +763,6 @@ mod test {
         }
 
         fn error(self, _error: std::io::Error) -> anyhow::Result<()> {
-            todo!()
-        }
-    }
-    struct FakeHasher {}
-    impl filestore::Hasher for FakeHasher {
-        fn update(self, _update: HashUpdate, _next: SystemTime) -> anyhow::Result<()> {
             todo!()
         }
     }

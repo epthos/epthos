@@ -1,7 +1,11 @@
 use self::{builder::Builder, peer::Peer};
 use crate::filepicker;
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::{
+    io::{ErrorKind, Read},
+    path::{Path, PathBuf},
+};
+use tracing::instrument;
 
 mod builder;
 mod peer;
@@ -13,7 +17,7 @@ pub struct Server<P: Peer> {
     picker: filepicker::Picker,
 }
 
-const _CHUNK_SIZE: usize = 2usize.pow(22); // 23 breaks the current gRPC limit.
+const CHUNK_SIZE: usize = 2usize.pow(22); // 23 breaks the current gRPC limit.
 
 pub fn builder() -> Builder {
     Builder::default()
@@ -40,18 +44,28 @@ impl<P: Peer> Server<P> {
                                     complete = false;
                                     continue;
                                 };
-                                let Ok(tp) = dir.file_type() else {
-                                    tracing::info!("failed to type file: {:?}", &dir);
+                                let Ok(md) = dir.metadata() else {
+                                    tracing::info!("failed to get metadata for {:?}", &dir);
                                     complete = false;
                                     continue;
                                 };
+                                let tp = md.file_type();
                                 if tp.is_dir() {
                                     updates
                                         .send(filepicker::ScanUpdate::Directory(dir.file_name()))
                                         .await?;
                                 } else if tp.is_file() {
+                                    let Ok(modified) = md.modified() else {
+                                        tracing::info!("failed to get mtime for {:?}", &dir);
+                                        complete = false;
+                                        continue;
+                                    };
                                     updates
-                                        .send(filepicker::ScanUpdate::File(dir.file_name()))
+                                        .send(filepicker::ScanUpdate::File(
+                                            dir.file_name(),
+                                            md.len(),
+                                            modified,
+                                        ))
                                         .await?;
                                 }
                             }
@@ -66,8 +80,12 @@ impl<P: Peer> Server<P> {
                         tracing::info!("scanned {:?} ({})", directory, batch);
                     }
                 }
-                filepicker::Next::CheckFile(file) => match std::fs::metadata(&file) {
-                    Ok(_) => todo!(),
+                filepicker::Next::CheckFile(file) => match hash_file(&file) {
+                    Ok(digest) => {
+                        self.picker
+                            .update(file, filepicker::Update::Hash(digest))
+                            .await?;
+                    }
                     Err(err) => {
                         self.picker
                             .update(file, filepicker::Update::Unreadable(err))
@@ -77,4 +95,26 @@ impl<P: Peer> Server<P> {
             }
         }
     }
+}
+
+#[instrument]
+fn hash_file(path: &Path) -> Result<ring::digest::Digest, std::io::Error> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = vec![0; CHUNK_SIZE];
+    loop {
+        match file.read(buffer.as_mut_slice()) {
+            Ok(0) => break,
+            Ok(bytes) => {
+                hasher.update(&buffer[..bytes]);
+            }
+            Err(err) => {
+                if err.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Ok(hasher.finish())
 }
