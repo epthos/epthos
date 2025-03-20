@@ -33,17 +33,23 @@ pub enum Next {
     /// channel. This is expected to happen without interleaving other calls
     /// to Picker.next().
     ScanDir(PathBuf, Sender<ScanUpdate>),
+    // Consider the file for backup. There is no guarantee that the file has
+    // changed since the last attempt, as we periodically retry files that have
+    // no metadata change, to ensure we detect corruption.
     CheckFile(PathBuf),
 }
 
 #[derive(Debug)]
 pub enum ScanUpdate {
+    // File inside the scanned directory, with basic metadata to identify
+    // high-level changes.
     File(OsString, filestore::FileSize, filestore::ModificationTime),
+    // Subdirectory of the scanned directory.
     Directory(OsString),
     /// Total failure to list the content of the directory.
     Error(std::io::Error),
     /// Completed the scan. Return true if all the entries were
-    /// reported.
+    /// reported, as entries that can't be read can only be skipped.
     Done(bool),
 }
 
