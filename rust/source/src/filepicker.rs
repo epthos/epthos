@@ -9,7 +9,7 @@ use crate::{
     filestore::{self, Connection, Filestore, HashNext, HashUpdate, Scanner},
     watcher,
 };
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use std::{
     collections::VecDeque,
     ffi::OsString,
@@ -206,10 +206,7 @@ impl<S: Filestore> PickerRunner<S> {
                         continue;
                     }
                     HashNext::Done(delay) => {
-                        tracing::debug!(
-                            "no next file to hash, waiting until {:?}",
-                            isotime(delay.clone())
-                        );
+                        tracing::debug!("no next file to hash, waiting until {:?}", isotime(delay));
                         scan_delay = Some(if let Some(previous) = scan_delay {
                             std::cmp::min(previous, delay)
                         } else {
@@ -224,10 +221,7 @@ impl<S: Filestore> PickerRunner<S> {
                         next_tx = None;
                     }
                     Ok(filestore::ScanNext::Done(delay)) => {
-                        tracing::info!(
-                            "tree scan done, waiting until {:?}",
-                            isotime(delay.clone())
-                        );
+                        tracing::info!("tree scan done, waiting until {:?}", isotime(delay));
                         scan_delay = Some(if let Some(previous) = scan_delay {
                             std::cmp::min(previous, delay)
                         } else {
@@ -358,10 +352,9 @@ fn isotime<T>(dt: T) -> anyhow::Result<String>
 where
     T: Into<time::OffsetDateTime>,
 {
-    Ok(dt
-        .into()
+    dt.into()
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .context("can't format timestamp")?)
+        .context("can't format timestamp")
 }
 
 #[cfg(test)]

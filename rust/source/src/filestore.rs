@@ -2,11 +2,11 @@
 //!
 //! This intentionally does _not_ perform any filesystem operations,
 //! to ensure testability and isolation.
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use crypto::model::FileId;
 use platform::LocalPathRepr;
-use rusqlite::{types, OptionalExtension};
-use rusqlite_migration::{Migrations, M};
+use rusqlite::{OptionalExtension, types};
+use rusqlite_migration::{M, Migrations};
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -238,7 +238,7 @@ impl Filestore for Connection {
         let txn = self.conn.transaction()?;
         let mut old_roots = get_roots(&txn).context("Failed to get current roots")?;
         for root in roots {
-            if let Some(_) = old_roots.get(*root) {
+            if old_roots.contains_key(*root) {
                 // The directory exists and is already a root. Just ensure we don't delete
                 // it at the end.
                 old_roots.remove(*root);
@@ -477,7 +477,7 @@ fn file_insert(
     Ok(())
 }
 
-impl<'a> Scanner for UpdaterImpl<'a> {
+impl Scanner for UpdaterImpl<'_> {
     fn update(&mut self, update: &ScanUpdate) -> anyhow::Result<()> {
         match update {
             ScanUpdate::Directory(subdir) => {
@@ -822,7 +822,7 @@ mod test {
 
         let got: Vec<(PathBuf, u64, u64)> = directory_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.aim, d.gen))
+            .map(|d| (d.path, d.tree_aim, d.tree_gen))
             .collect();
         assert_eq!(
             got,
@@ -831,7 +831,7 @@ mod test {
 
         let got: Vec<(PathBuf, u64, u64, SystemTime)> = fileid_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.gen, d.file_size, d.modification))
+            .map(|d| (d.path, d.tree_gen, d.file_size, d.modification))
             .collect();
         assert_eq!(got, vec![(a.join("f1"), 1, 100, usec_to_time(1000)?)]);
         Ok(())
@@ -877,7 +877,7 @@ mod test {
 
         let got: Vec<(PathBuf, u64, u64)> = directory_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.aim, d.gen))
+            .map(|d| (d.path, d.tree_aim, d.tree_gen))
             .collect();
         assert_eq!(
             got,
@@ -891,7 +891,7 @@ mod test {
 
         let got: Vec<(PathBuf, u64, u64, SystemTime)> = fileid_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.gen, d.file_size, d.modification))
+            .map(|d| (d.path, d.tree_gen, d.file_size, d.modification))
             .collect();
         assert_eq!(
             got,
@@ -1023,7 +1023,7 @@ mod test {
 
         let got: Vec<(PathBuf, u64)> = fileid_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.gen))
+            .map(|d| (d.path, d.tree_gen))
             .collect();
         // "a/b" is currently a directory, so the file gen is stuck at 1.
         assert_eq!(got, vec![(a.join("b"), 1)]);
@@ -1036,14 +1036,14 @@ mod test {
 
         let got: Vec<(PathBuf, u64)> = fileid_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.gen))
+            .map(|d| (d.path, d.tree_gen))
             .collect();
         // The file is back on the scan.
         assert_eq!(got, vec![(a.join("b"), 3)]);
 
         let got: Vec<(PathBuf, u64, u64)> = directory_dump(cnx.conn())?
             .into_iter()
-            .map(|d| (d.path, d.gen, d.aim))
+            .map(|d| (d.path, d.tree_gen, d.tree_aim))
             .collect();
         // ... and "a/b" as a directory is now stale.
         assert_eq!(got, vec![(a.into(), 3, 3), (a.join("b"), 2, 2),]);
@@ -1124,8 +1124,8 @@ mod test {
         id: DirectoryId,
         path: PathBuf,
         root: bool,
-        gen: u64,
-        aim: u64,
+        tree_gen: u64,
+        tree_aim: u64,
         error: Option<String>,
     }
 
@@ -1133,7 +1133,7 @@ mod test {
     struct FullFileId {
         id: FileId,
         path: PathBuf,
-        gen: u64,
+        tree_gen: u64,
         file_size: FileSize,
         modification: SystemTime,
     }
@@ -1163,8 +1163,8 @@ mod test {
                     id: row.get(0)?,
                     path: to_path(row.get(1)?)?,
                     root: row.get(2)?,
-                    aim: row.get(3)?,
-                    gen: row.get(4)?,
+                    tree_aim: row.get(3)?,
+                    tree_gen: row.get(4)?,
                     error: row.get(5)?,
                 })
             })
@@ -1186,7 +1186,7 @@ mod test {
                 Ok(FullFileId {
                     id: to_fileid(&id)?,
                     path: to_path(row.get(1)?)?,
-                    gen: row.get(2)?,
+                    tree_gen: row.get(2)?,
                     file_size: row.get(3)?,
                     modification: usec_to_time(row.get(4)?)?,
                 })
