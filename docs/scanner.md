@@ -1,78 +1,35 @@
-notify -> {create, change, move, delete}
+Instead of having an immutable ID to represent a file, we could see the id
+just as the encryption salt. Then we can more easily have multiple files
+share the salt when we realize they are actually related, and would benefit
+from block sharing. This still makes attacks hard as the salt can only be
+influenced by having direct access to the existing files. We can also stop
+caring about collisions, as long as we generate randomly for the other files.
 
-```sql
-CREATE TABLE Scanner (
-    k STRING PRIMARY KEY,
-    i INTEGER,
-    s STRING,
-) STRICT, WITHOUT ROWID;
+Generate the id/salt only after the first hash? This would help distinguish
+new files from already seen files, and ensure we back up only after we know
+we won't duplicate blocks unnecessarily.
 
-CREATE TABLE Directory (
-    id      INTEGER PRIMARY KEY,
-    path    BLOB NOT NULL,     -- in local form, canonicalized
-    depth   INTEGER NOT NULL,  -- # of components in the path
-    FOREIGN KEY(parent) REFERENCES Directory(id)
-        DEFERRABLE INITIALLY DEFERRED,
-    
-    fastGen INTEGER NOT NULL,
-    fullGen INTEGER NOT NULL,
-) STRICT, WITHOUT ROWID;
+Directories won't need an id in that case.
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_dir_path ON Directory(Path);
+Instead of forwarding the watcher's content directly as filepicker.next(),
+why not store the new file size and change time directly into filestore ?
+Introduce a dirty bit, so that the file is flagged for backup.
 
-CREATE TABLE FileId (
-    id   BLOB PRIMARY KEY,
-    path BLOB NOT NULL,
-    FOREIGN KEY(parent) REFERENCES Directory(id)
-        DEFERRABLE INITIALLY DEFERRED
-    
-    fastGen INTEGER NOT NULL,
-    fullGen INTEGER NOT NULL,
-```
+File states:
 
-Scan can be fast or full. We keep the following state:
+- NEW: no assigned id yet, only size & mtime. Triggers hashing & matching.
+- DIRTY: caused by a change in size, mtime or hash. Triggers backup.
+- BUSY: actively being backed up. Should we hardlink to snapshot?
+- CLEAN: caused by backup completion. Provides updated size, mtime, hash as
+         of the backup. 
 
-TARGET: (fast, fastTime, full, fullTime)
-- indicates what files and directories must be checked,
-  and when a new full scan is required.
+Question: do we want to hash during a backup only, or as a separate pass?
 
-Each directory and file keeps its own clock (fast, full).
-
-For directories, the clock only updates when children are up-to-date,
-to help track progress. Overall, fast >= full (a full implies a fast).
-
-We do a fast every time the server starts, as we might have missed
-notifications. We do a full every week or so. Note that finding a new
-file will trigger a hash check to detect moves, but won't update full
-if it's during a fast pass. This ensures that we never have gens larger
-than the target.
-
-## API
-
-scanner.Start()
- 1. begin notify feed
-
-scanner.SetRoots([dirs])
- 1. add missing dirs at (0, 0)
- 1. enable scan.
-
-scanner.Candidate() -> struct of what needs scanning:
- - as a stream so that scanner can manage pauses in scanning
- - with a fast vs full bit, to drive the operation
- - we also want to scan full directories, to _find_ contents.
-
-scanner.Update(path: &Path, data):
- - must not assume anything about the origin of the file.
-
-Scanning:
- 1. SELECT path FROM Directory 
-    WHERE 
-      depth = (SELECT MAX(depth) FROM Directory)
-      AND gen < $TARGET
-    ORDER BY RANDOM() LIMIT 1;
- 1. // Walk that directory, add missing subdirectories, handle files.
- 1. UPDATE gen = $TARGET WHERE path = $PATH;
-
+- during the backup gives some consistency between what's in the store and
+  what was really backed up. Do we need that consistency though?
+- as a separate pass increases the volume of data being read, esp. for very
+  large files.
+  
 
 TODO: Handling of dropped roots: Crashplan deletes data right away.
       I don't like this as the default, maybe just a future improvement
