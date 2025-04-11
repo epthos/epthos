@@ -9,8 +9,6 @@ Generate the id/salt only after the first hash? This would help distinguish
 new files from already seen files, and ensure we back up only after we know
 we won't duplicate blocks unnecessarily.
 
-Directories won't need an id in that case.
-
 Instead of forwarding the watcher's content directly as filepicker.next(),
 why not store the new file size and change time directly into filestore ?
 Introduce a dirty bit, so that the file is flagged for backup.

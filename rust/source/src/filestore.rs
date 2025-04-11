@@ -116,21 +116,20 @@ impl std::fmt::Debug for UpdaterImpl<'_> {
     }
 }
 
-/// Unique ID of a directory under the roots.
-type DirectoryId = u64;
-
 // Internal representation of a directory.
 #[derive(Debug, PartialEq)]
 struct Directory {
-    id: DirectoryId,
-    path: PathBuf,
+    path: LocalPathRepr,
     root: bool,
     error: Option<String>,
 }
 
 impl Directory {
-    pub fn path(&self) -> &Path {
-        &self.path
+    fn path(&self) -> anyhow::Result<PathBuf> {
+        self.path
+            .clone()
+            .try_into()
+            .context("failed to convert to path")
     }
 }
 
@@ -170,8 +169,7 @@ CREATE TABLE Settings (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE Directory (
-    id       INTEGER PRIMARY KEY,
-    path     BLOB NOT NULL,     -- in local form, canonicalized
+    path     BLOB PRIMARY KEY,     -- in local form, canonicalized
     root     INTEGER NOT NULL,  -- Boolean
     -- When walking the tree, tree_aim marks directories that have
     -- been seen, and tree_gen marks directories that haven been
@@ -232,9 +230,6 @@ impl Filestore for Connection {
     /// can impact which files will be backed up in the future.
     fn set_roots(&mut self, roots: &[&Path]) -> anyhow::Result<bool> {
         let mut changed = false; // tracks if any of the roots changed.
-        struct R {
-            id: DirectoryId,
-        }
         let txn = self.conn.transaction()?;
         let mut old_roots = get_roots(&txn).context("Failed to get current roots")?;
         for root in roots {
@@ -247,27 +242,24 @@ impl Filestore for Connection {
             changed = true;
             // The directory is not a root, but might exist nevertheless.
             let root: LocalPathRepr = root.into();
-            let mut stmt = txn.prepare("SELECT id FROM Directory WHERE path = ?1")?;
-            let result = stmt
-                .query_row((root.as_ref(),), |row| Ok(R { id: row.get(0)? }))
-                .optional()?;
-            match result {
-                Some(R { id }) => {
-                    txn.execute("UPDATE Directory SET root = TRUE WHERE id = ?1", (id,))
-                        .context("Failed to demote root")?;
-                }
-                None => {
-                    add_root(&txn, &root)?;
-                }
+            let count = txn
+                .execute(
+                    "UPDATE Directory SET root = TRUE WHERE path = ?1",
+                    (root.as_ref(),),
+                )
+                .context("Failed to insert new root")?;
+            if count == 0 {
+                add_root(&txn, &root)?;
             }
         }
         for old_root in old_roots.into_values() {
             changed = true;
             // We turn the old roots into regular directories. Their cleanup is done as
             // part of a scan, not now.
+            let old_root: LocalPathRepr = old_root.path.into();
             txn.execute(
-                "UPDATE Directory SET root = FALSE WHERE id = ?1",
-                (old_root.id,),
+                "UPDATE Directory SET root = FALSE WHERE path = ?1",
+                (old_root.as_ref(),),
             )
             .context("Failed to demote root")?;
         }
@@ -309,7 +301,7 @@ impl Filestore for Connection {
             .query_row(
                 r#"
                 SELECT
-                  id, path, root, access_error
+                  path, root, access_error
                 FROM
                   Directory
                 WHERE
@@ -318,10 +310,9 @@ impl Filestore for Connection {
                 (aim,),
                 |row| {
                     Ok(Directory {
-                        id: row.get(0)?,
-                        path: to_path(row.get(1)?)?,
-                        root: row.get(2)?,
-                        error: row.get(3)?,
+                        path: LocalPathRepr::new(row.get(0)?),
+                        root: row.get(1)?,
+                        error: row.get(2)?,
                     })
                 },
             )
@@ -331,7 +322,7 @@ impl Filestore for Connection {
 
         let candidate = match result {
             Some(dir) => ScanNext::Next(
-                dir.path().into(),
+                dir.path()?,
                 UpdaterImpl {
                     rand: self.rand.clone(),
                     tx: self.conn.transaction()?,
@@ -481,7 +472,7 @@ impl Scanner for UpdaterImpl<'_> {
     fn update(&mut self, update: &ScanUpdate) -> anyhow::Result<()> {
         match update {
             ScanUpdate::Directory(subdir) => {
-                let path: LocalPathRepr = self.dir.path.join(subdir).into();
+                let path: LocalPathRepr = self.dir.path()?.join(subdir).into();
                 let count = self.tx.execute(
                     "UPDATE Directory SET tree_aim = ?1 WHERE path = ?2",
                     (self.aim, path.as_ref()),
@@ -493,7 +484,7 @@ impl Scanner for UpdaterImpl<'_> {
                 }
             }
             ScanUpdate::File(file, file_size, modification_time) => {
-                let path: LocalPathRepr = self.dir.path.join(file).into();
+                let path: LocalPathRepr = self.dir.path()?.join(file).into();
                 let count = self.tx.execute(
                     "UPDATE FileId SET tree_gen = ?1, file_size = ?3, modification_time_us = ?4 WHERE path = ?2",
                     (self.aim, path.as_ref(), file_size, time_to_usec(modification_time)?),
@@ -520,30 +511,32 @@ impl Scanner for UpdaterImpl<'_> {
         Ok(())
     }
     fn commit(self, complete: bool) -> anyhow::Result<()> {
+        let path: LocalPathRepr = self.dir.path.into();
         self.tx.execute(
-            "UPDATE Directory SET tree_gen = ?1, complete = ?3, access_error = NULL WHERE id = ?2",
-            (self.aim, self.dir.id, complete),
+            "UPDATE Directory SET tree_gen = ?1, complete = ?3, access_error = NULL WHERE path = ?2",
+            (self.aim, path.as_ref(), complete),
         )?;
         self.tx.commit()?;
         Ok(())
     }
 
     fn error(self, error: std::io::Error) -> anyhow::Result<()> {
+        let path: LocalPathRepr = self.dir.path.into();
         self.tx.execute(
-            "UPDATE Directory SET tree_gen = ?1, complete = 0, access_error = ?3 WHERE id = ?2",
-            (self.aim, self.dir.id, format!("{:?}", error)),
+            "UPDATE Directory SET tree_gen = ?1, complete = 0, access_error = ?3 WHERE path = ?2",
+            (self.aim, path.as_ref(), format!("{:?}", error)),
         )?;
         self.tx.commit()?;
         Ok(())
     }
 }
 
-fn add_root(txn: &rusqlite::Transaction, path: &LocalPathRepr) -> anyhow::Result<DirectoryId> {
+fn add_root(txn: &rusqlite::Transaction, path: &LocalPathRepr) -> anyhow::Result<()> {
     let mut stmt = txn
         .prepare("INSERT INTO Directory(path, root, tree_aim, tree_gen, complete) VALUES (?1, TRUE, 0, 0, 0)")?;
     stmt.execute((path.as_ref(),))
         .context("Failed to insert root")?;
-    Ok(txn.last_insert_rowid() as DirectoryId)
+    Ok(())
 }
 
 fn initialize(
@@ -562,17 +555,16 @@ fn initialize(
 fn get_roots(txn: &rusqlite::Transaction) -> anyhow::Result<HashMap<PathBuf, Directory>> {
     let mut roots = HashMap::new();
     let mut stmt =
-        txn.prepare("SELECT id, path, root, access_error FROM Directory WHERE root = TRUE")?;
+        txn.prepare("SELECT path, root, access_error FROM Directory WHERE root = TRUE")?;
     for row in stmt.query_map((), |row| {
         Ok(Directory {
-            id: row.get(0)?,
-            path: to_path(row.get(1)?)?,
-            root: row.get(2)?,
-            error: row.get(3)?,
+            path: LocalPathRepr::new(row.get(0)?),
+            root: row.get(1)?,
+            error: row.get(2)?,
         })
     })? {
         let row = row?;
-        roots.insert(row.path.clone(), row);
+        roots.insert(row.path()?, row);
     }
     Ok(roots)
 }
@@ -680,6 +672,7 @@ fn time_to_seconds(ts: &SystemTime) -> Result<u64, rusqlite::Error> {
         .as_secs())
 }
 
+#[cfg(test)]
 fn usec_to_time(ts: u64) -> Result<SystemTime, rusqlite::Error> {
     SystemTime::UNIX_EPOCH
         .checked_add(Duration::from_micros(ts))
@@ -1121,7 +1114,6 @@ mod test {
 
     #[derive(Debug, PartialEq)]
     struct FullDirectory {
-        id: DirectoryId,
         path: PathBuf,
         root: bool,
         tree_gen: u64,
@@ -1155,17 +1147,16 @@ mod test {
     fn directory_dump(conn: &mut rusqlite::Connection) -> anyhow::Result<Vec<FullDirectory>> {
         let mut result = vec![];
         let mut stmt = conn.prepare(
-            "SELECT id, path, root, tree_aim, tree_gen, access_error FROM Directory ORDER BY path",
+            "SELECT path, root, tree_aim, tree_gen, access_error FROM Directory ORDER BY path",
         )?;
         for row in stmt
             .query_map((), |row| {
                 Ok(FullDirectory {
-                    id: row.get(0)?,
-                    path: to_path(row.get(1)?)?,
-                    root: row.get(2)?,
-                    tree_aim: row.get(3)?,
-                    tree_gen: row.get(4)?,
-                    error: row.get(5)?,
+                    path: to_path(row.get(0)?)?,
+                    root: row.get(1)?,
+                    tree_aim: row.get(2)?,
+                    tree_gen: row.get(3)?,
+                    error: row.get(4)?,
                 })
             })
             .context("Failed to list directories")?
