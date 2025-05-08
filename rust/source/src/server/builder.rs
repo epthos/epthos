@@ -84,7 +84,7 @@ impl Builder {
         Ok(Server {
             roots: self.roots,
             _peer: peer,
-            picker: filemanager::new(store_local, TREE_SCAN_PERIOD, &self.db, rnd)
+            manager: filemanager::new(store_local, TREE_SCAN_PERIOD, &self.db, rnd)
                 .context("Failed to open DB")?,
         })
     }
