@@ -1,5 +1,5 @@
-use super::{peer, Server};
-use crate::filepicker;
+use super::{Server, peer};
+use crate::filemanager;
 use anyhow::Context;
 use settings::connection;
 use source_settings::Settings;
@@ -84,7 +84,7 @@ impl Builder {
         Ok(Server {
             roots: self.roots,
             _peer: peer,
-            picker: filepicker::new(store_local, TREE_SCAN_PERIOD, &self.db, rnd)
+            picker: filemanager::new(store_local, TREE_SCAN_PERIOD, &self.db, rnd)
                 .context("Failed to open DB")?,
         })
     }

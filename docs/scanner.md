@@ -1,5 +1,5 @@
-Instead of having an immutable ID to represent a file, we could see the id
-just as the encryption salt. Then we can more easily have multiple files
+Instead of having an immutable ID to represent a file, we could use the id
+as the HKDF parameter. Then we can more easily have multiple files
 share the salt when we realize they are actually related, and would benefit
 from block sharing. This still makes attacks hard as the salt can only be
 influenced by having direct access to the existing files. We can also stop
@@ -21,17 +21,19 @@ File states:
 - CLEAN: caused by backup completion. Provides updated size, mtime, hash as
          of the backup. 
 
-Question: do we want to hash during a backup only, or as a separate pass?
+<O> -- Scan::update(mtime, fsize) --> NEW
+    -- mark_dirty(mtime, fsize)   --> NEW
 
-- during the backup gives some consistency between what's in the store and
-  what was really backed up. Do we need that consistency though?
-- as a separate pass increases the volume of data being read, esp. for very
-  large files.
-  
+NEW   -- hash_next(hash) --> DIRTY, add encryption_group.
+DIRTY -- backup_start    --> BUSY, snapshot.
+BUSY  -- complete(mtime, fsize, hash) --> CLEAN
+CLEAN -- hash_next(hash), scan::update() --> DIRTY if changed.
+UNAVAILABLE -- file can't be read
+
 
 TODO: Handling of dropped roots: Crashplan deletes data right away.
       I don't like this as the default, maybe just a future improvement
-      to do explicit garbage collection, triggered by the source.
+      to do *explicit* garbage collection, triggered by the source.
 
 TODO: How do "directory moves" get represented by notify? 
       I need to propagate to all children, incl. keeping FileId.

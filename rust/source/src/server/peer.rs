@@ -129,7 +129,7 @@ where
                 Some(PeerOp::Send(data, tx)) => {
                     let result = sink.store(&data).await.context("Sink error");
 
-                    // We might hide connection errors here to let the picker find the new location of the sink.
+                    // We might hide connection errors here to let the source find the new location of the sink.
                     // TODO: only return on connection errors, surface other errors to the caller.
                     if result.is_err() {
                         tracing::info!("Failed to send chunk: {:?}", result);

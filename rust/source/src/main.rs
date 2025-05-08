@@ -2,8 +2,10 @@ use ::settings::process;
 use anyhow::{Context, Result};
 use std::{path::Path, sync::Arc};
 
-mod filepicker;
+mod disk;
+mod filemanager;
 mod filestore;
+mod model;
 mod server;
 mod watcher;
 

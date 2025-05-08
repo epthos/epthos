@@ -1,15 +1,15 @@
 use std::vec;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use crypto::{model, RandomApi};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use crypto::{RandomApi, model};
 
 struct Cleartext {
     verified: model::VerifiedBlock,
     protected: model::ProtectedBlock,
 }
 
-fn gen_cleartext(rnd: &crypto::Random, file_id: &model::FileId, size: usize) -> Cleartext {
+fn gen_cleartext(rnd: &crypto::Random, file_id: &model::EncryptionGroup, size: usize) -> Cleartext {
     let block_id = rnd.generate_block_id().unwrap();
 
     Cleartext {
@@ -27,7 +27,7 @@ fn gen_cleartext(rnd: &crypto::Random, file_id: &model::FileId, size: usize) -> 
 fn gen_encrypted(
     rnd: &crypto::Random,
     key: &crypto::Keys,
-    file_id: &model::FileId,
+    file_id: &model::EncryptionGroup,
     size: usize,
 ) -> model::Block {
     let cleartext = gen_cleartext(rnd, file_id, size);

@@ -9,8 +9,8 @@ use std::sync::Arc;
 /// Both properties must be strongly enforced for the encryption to be
 /// secure.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct FileId([u8; FILE_ID_LEN]);
-pub const FILE_ID_LEN: usize = 48 / 8;
+pub struct EncryptionGroup([u8; ENCRYPTION_GROUP_LEN]);
+pub const ENCRYPTION_GROUP_LEN: usize = 48 / 8;
 
 /// BlockId is a unique and random identifier for a data block.
 /// Both properties must be strongly enforced for the encryption to be
@@ -61,7 +61,7 @@ impl Chunk {
 pub struct VerifiedDescriptor {
     // Files (based on their path) have a unique file_id
     // per source, as RAND(48).
-    pub file_id: FileId,
+    pub file_id: EncryptionGroup,
 
     // Each file goes through monotonic versions as they are
     // modified. The version is a concept defined by the
@@ -88,7 +88,7 @@ pub struct ProtectedDescriptor {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedBlock {
-    pub file_id: FileId,
+    pub file_id: EncryptionGroup,
     pub block_id: BlockId,
 }
 
@@ -104,26 +104,26 @@ pub struct Block {
     pub protected: Arc<Vec<u8>>,
 }
 
-impl FileId {
-    pub fn as_bytes(&self) -> &[u8; FILE_ID_LEN] {
+impl EncryptionGroup {
+    pub fn as_bytes(&self) -> &[u8; ENCRYPTION_GROUP_LEN] {
         &self.0
     }
 
-    pub fn as_mut_bytes(&mut self) -> &mut [u8; FILE_ID_LEN] {
+    pub fn as_mut_bytes(&mut self) -> &mut [u8; ENCRYPTION_GROUP_LEN] {
         &mut self.0
     }
 }
 
-impl TryFrom<&[u8]> for FileId {
+impl TryFrom<&[u8]> for EncryptionGroup {
     type Error = anyhow::Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != FILE_ID_LEN {
+        if value.len() != ENCRYPTION_GROUP_LEN {
             anyhow::bail!("Invalid length for FileId");
         }
-        let mut file_id = [0u8; FILE_ID_LEN];
+        let mut file_id = [0u8; ENCRYPTION_GROUP_LEN];
         file_id.copy_from_slice(value);
-        Ok(FileId(file_id))
+        Ok(EncryptionGroup(file_id))
     }
 }
 
@@ -156,16 +156,16 @@ mod test {
 
     #[test]
     fn test_file_id_from_correct_slice() {
-        let bytes: [u8; FILE_ID_LEN] = [0, 1, 2, 3, 4, 5];
-        let file_id = FileId::try_from(bytes.as_ref());
+        let bytes: [u8; ENCRYPTION_GROUP_LEN] = [0, 1, 2, 3, 4, 5];
+        let file_id = EncryptionGroup::try_from(bytes.as_ref());
         assert!(file_id.is_ok());
         assert!(file_id.unwrap().as_bytes() == &bytes);
     }
 
     #[test]
     fn test_file_id_from_incorrect_slice() {
-        let bytes: [u8; FILE_ID_LEN - 1] = [0, 1, 2, 3, 4];
-        let file_id = FileId::try_from(bytes.as_ref());
+        let bytes: [u8; ENCRYPTION_GROUP_LEN - 1] = [0, 1, 2, 3, 4];
+        let file_id = EncryptionGroup::try_from(bytes.as_ref());
         assert!(file_id.is_err());
     }
 
@@ -179,7 +179,7 @@ mod test {
 
     #[test]
     fn test_block_id_from_incorrect_slice() {
-        let bytes: [u8; FILE_ID_LEN] = [0, 1, 2, 3, 4, 5];
+        let bytes: [u8; ENCRYPTION_GROUP_LEN] = [0, 1, 2, 3, 4, 5];
         let block_id = BlockId::try_from(bytes.as_ref());
         assert!(block_id.is_err());
     }

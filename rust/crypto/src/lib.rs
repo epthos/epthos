@@ -23,7 +23,7 @@ pub enum CryptoError {
 }
 
 pub trait RandomApi {
-    fn generate_file_id(&self) -> anyhow::Result<model::FileId>;
+    fn generate_file_id(&self) -> anyhow::Result<model::EncryptionGroup>;
     fn generate_block_id(&self) -> anyhow::Result<model::BlockId>;
 }
 pub type SharedRandom = Arc<dyn RandomApi + Send + Sync>;
@@ -61,8 +61,8 @@ impl Random {
 impl RandomApi for Random {
     /// Generates a new random FileId. For complete safety, unicity should
     /// be checked against the database.
-    fn generate_file_id(&self) -> anyhow::Result<model::FileId> {
-        let mut id = model::FileId::default();
+    fn generate_file_id(&self) -> anyhow::Result<model::EncryptionGroup> {
+        let mut id = model::EncryptionGroup::default();
         self.rnd
             .fill(id.as_mut_bytes())
             .map_err(|_| CryptoError::Internal("while generating file_id".to_string()))?;
@@ -186,19 +186,19 @@ impl Keys {
     }
 
     // Descriptor key = HKDF(key, salt = file_id, info = "descriptor key")
-    fn derive_descriptor_key(&self, file_id: &model::FileId) -> key::Key {
+    fn derive_descriptor_key(&self, file_id: &model::EncryptionGroup) -> key::Key {
         derive_key(&self.durable, file_id, &DESCRIPTOR_KEY_INFO)
     }
 
     // Block key = HKDF(key, salt = file_id, info = "block key")
-    fn derive_block_key(&self, file_id: &model::FileId) -> key::Key {
+    fn derive_block_key(&self, file_id: &model::EncryptionGroup) -> key::Key {
         derive_key(&self.durable, file_id, &BLOCK_KEY_INFO)
     }
 }
 
 // HKDF key derivation helper. All keys derive from the FileId, with different
 // info strings and input key material.
-fn derive_key(key: &key::Durable, file_id: &model::FileId, info: &[&[u8]]) -> key::Key {
+fn derive_key(key: &key::Durable, file_id: &model::EncryptionGroup, info: &[&[u8]]) -> key::Key {
     // TODO: keep the salt with the FileId if it's a performnce issue.
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, file_id.as_bytes());
     let prk = salt.extract(key.key().as_ref());
@@ -215,11 +215,17 @@ fn derive_key(key: &key::Durable, file_id: &model::FileId, info: &[&[u8]]) -> ke
 // The 96 bit nonce of the descriptor is deterministic and is defined as:
 //   file_id || version || index
 //        48 ||      32 ||    16
-fn get_descriptor_nonce(file_id: &model::FileId, version: u32, index: u16) -> nonce::Nonce {
+fn get_descriptor_nonce(
+    file_id: &model::EncryptionGroup,
+    version: u32,
+    index: u16,
+) -> nonce::Nonce {
     let mut nonce = [0u8; nonce::NONCE_LEN];
-    nonce[0..model::FILE_ID_LEN].copy_from_slice(file_id.as_bytes());
-    nonce[model::FILE_ID_LEN..model::FILE_ID_LEN + 4].copy_from_slice(&version.to_le_bytes());
-    nonce[model::FILE_ID_LEN + 4..model::FILE_ID_LEN + 6].copy_from_slice(&index.to_le_bytes());
+    nonce[0..model::ENCRYPTION_GROUP_LEN].copy_from_slice(file_id.as_bytes());
+    nonce[model::ENCRYPTION_GROUP_LEN..model::ENCRYPTION_GROUP_LEN + 4]
+        .copy_from_slice(&version.to_le_bytes());
+    nonce[model::ENCRYPTION_GROUP_LEN + 4..model::ENCRYPTION_GROUP_LEN + 6]
+        .copy_from_slice(&index.to_le_bytes());
     nonce
 }
 

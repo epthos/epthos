@@ -49,7 +49,7 @@ impl Root {
 
     /// Get a handler for a specific file. This does create the directory on disk if it does not
     /// exist.
-    pub fn file(&self, file_id: &model::FileId) -> anyhow::Result<File> {
+    pub fn file(&self, file_id: &model::EncryptionGroup) -> anyhow::Result<File> {
         let dir = self.dir.join(hex::encode(file_id.as_bytes()));
         if !dir.exists() {
             std::fs::create_dir(&dir).context(format!("Failed to create output dir {:?}", &dir))?;
