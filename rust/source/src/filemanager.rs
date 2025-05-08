@@ -252,8 +252,13 @@ mod test {
         let local_ref = &local;
         local
             .run_until(async move {
+                let mut store = StoreState::default();
+                // Convince the manager to avoid running a scan right away after
+                // the first one.
+                // TODO: We should mock time instead.
+                store.next_scan = SystemTime::now() + Duration::from_secs(30);
                 let (manager, store_state, _tx) =
-                    test_manager(local_ref, WatcherState::default(), StoreState::default());
+                    test_manager(local_ref, WatcherState::default(), store);
 
                 manager.set_roots(vec![Path::new("/a").into()]).await?;
                 let sc1 = store_state.lock().unwrap().scan_round;
