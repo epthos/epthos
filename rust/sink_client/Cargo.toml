@@ -14,4 +14,4 @@ sink_proto = { path = "../sink_proto" }
 anyhow = "1"
 mockall = "0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tonic = { version = "0", features = ["tls"] }
+tonic = { version = "0", features = ["tls-ring"] }

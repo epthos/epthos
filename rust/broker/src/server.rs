@@ -1,13 +1,13 @@
 use ::settings::connection;
 use anyhow::Result;
 use broker_proto::{
-    broker_server::{Broker, BrokerServer},
     CheckinReply, CheckinRequest, SinkInfo,
+    broker_server::{Broker, BrokerServer},
 };
-use rpcutil::auth::{self, Peer};
+use rpcutil::auth::{self, AuthInterceptor, Peer};
 use std::net::{AddrParseError, SocketAddr};
 use tonic::transport;
-use tonic::{transport::ServerTlsConfig, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::ServerTlsConfig};
 
 pub mod settings;
 mod topology;
@@ -125,15 +125,14 @@ impl Server {
         tracing::info!("starting up on {:?}", &self.address);
 
         let broker = BrokerImpl::new(self.mapping.clone());
-
+        let svc = BrokerServer::with_interceptor(broker, AuthInterceptor::default());
         transport::Server::builder()
             .tls_config(
                 ServerTlsConfig::new()
                     .identity(self.client_connection.identity().clone())
                     .client_ca_root(self.client_connection.peer_root().clone()),
             )?
-            .layer(auth::layer())
-            .add_service(BrokerServer::new(broker))
+            .add_service(svc)
             .serve(self.address)
             .await?;
 

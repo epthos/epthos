@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
 use broker_client::Broker;
-use rpcutil::auth;
+use rpcutil::auth::{self, AuthInterceptor};
 use settings::connection;
 use sink_proto::{
-    sink_server::{Sink, SinkServer},
     StoreReply, StoreRequest,
+    sink_server::{Sink, SinkServer},
 };
 use sink_settings::Settings;
 use std::net::{AddrParseError, SocketAddr};
 use tokio::net::TcpListener;
 use tonic::{
-    transport::{self, ServerTlsConfig},
     Request, Response, Status,
+    transport::{self, ServerTlsConfig},
 };
 
 pub struct Server {
@@ -108,14 +108,14 @@ impl Server {
         broker.set_addresses(&accepting_on).await?;
 
         let sink = SinkImpl::default();
+        let svc = SinkServer::with_interceptor(sink, AuthInterceptor::default());
         transport::Server::builder()
             .tls_config(
                 ServerTlsConfig::new()
                     .identity(self.connection.identity().clone())
                     .client_ca_root(self.connection.peer_root().clone()),
             )?
-            .layer(auth::layer())
-            .add_service(SinkServer::new(sink))
+            .add_service(svc)
             .serve(addr)
             .await?;
 

@@ -18,6 +18,6 @@ rand = "0"
 rustls-pemfile = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
-tonic = { version = "0", features = ["tls"] }
+tonic = { version = "0", features = ["tls-ring"] }
 tower = { version = "0", features = ["util"] }
 x509-parser = "0"

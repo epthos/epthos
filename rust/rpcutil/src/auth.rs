@@ -1,8 +1,8 @@
 use std::{fmt, sync::Arc};
 use tonic::{
-    service::{self, interceptor::InterceptorLayer},
-    transport::CertificateDer,
     Request, Status,
+    service::{self},
+    transport::CertificateDer,
 };
 use x509_parser::prelude::X509Error;
 
@@ -35,13 +35,6 @@ pub struct Source {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Sink {
     pub id: String,
-}
-
-/// Returns a layer doing cert-based authentication.
-///
-/// Use peer() to access the extracted information in any method handler.
-pub fn layer() -> InterceptorLayer<AuthInterceptor> {
-    service::interceptor(AuthInterceptor::default())
 }
 
 /// Returns the Peer extracted by layer() or an error if it's unavailable.

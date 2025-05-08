@@ -11,4 +11,4 @@ doctest = false
 
 [dependencies]
 settings = {path = "../settings"}
-tonic = { version = "0", features = ["tls"] }
+tonic = { version = "0", features = ["tls-ring"] }

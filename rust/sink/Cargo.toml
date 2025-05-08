@@ -19,6 +19,6 @@ sink_settings = { path = "../sink_settings" }
 anyhow = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tonic = { version = "0", features = ["tls"] }
+tonic = { version = "0", features = ["tls-ring"] }
 tracing = "0"
 

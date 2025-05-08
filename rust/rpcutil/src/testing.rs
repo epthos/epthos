@@ -1,16 +1,14 @@
 //! Collection of helpers for writing client/server tests.
 
-use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
-
 use http::{Request, Response};
 use hyper_util::rt::tokio::TokioIo;
-use tokio::sync::{mpsc::Sender, Mutex};
+use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
+use tokio::sync::{Mutex, mpsc::Sender};
 use tonic::{
-    body::BoxBody,
+    Result, Status,
     codegen::Service,
     server::NamedService,
     transport::{Channel, Endpoint, Server, Uri},
-    Result, Status,
 };
 
 use crate::Sleeper;
@@ -43,9 +41,13 @@ impl<T, const N: usize> From<[Result<tonic::Response<T>, Status>; N]> for Canned
 /// A simple server can be created using the CannedResponses type above.
 pub async fn fake_server<S>(service: S) -> anyhow::Result<Channel>
 where
-    S: Service<Request<BoxBody>, Response = Response<BoxBody>, Error = Infallible>
-        + NamedService
+    S: Service<
+            Request<tonic::body::Body>,
+            Response = Response<tonic::body::Body>,
+            Error = Infallible,
+        > + NamedService
         + Clone
+        + Sync
         + Send
         + 'static,
     S::Future: Send + 'static,
