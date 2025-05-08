@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG RUST_VERSION=1.84.0
+ARG RUST_VERSION=1.86.0
 ARG APP_NAME=broker
 
 ################################################################################
