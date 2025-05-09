@@ -64,7 +64,7 @@ impl service::Interceptor for AuthInterceptor {
 /// email.
 fn get_peer(certs: &Option<Arc<Vec<CertificateDer>>>) -> Result<Peer, AuthError> {
     let certs = certs.as_ref().ok_or(AuthError::NoClientCert)?;
-    if certs.len() < 1 {
+    if certs.is_empty() {
         return Err(AuthError::NoClientCert);
     }
     // The leaf of the certificate chain must be provided first, with the links to the root following.

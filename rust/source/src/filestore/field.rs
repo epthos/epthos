@@ -14,17 +14,17 @@ use std::{
 #[derive(Debug, PartialEq, Clone)]
 pub enum FileState {
     // A file is new when it does not yet have a filegroup assigned.
-    NEW = 1,
+    New = 1,
     // A file is dirty if some of its properties changed: size, mtime, hash.
-    DIRTY = 2,
+    Dirty = 2,
     // Many files can be dirty but can't be backed up all at once. A busy file
     // is being actively backed up.
-    BUSY = 3,
+    Busy = 3,
     // Once backed up, a file's size, mtime and hash are refreshed and the file
     // is now clean.
-    CLEAN = 4,
+    Clean = 4,
     // The file cannot be read or stat'd.
-    UNAVAILABLE = 5,
+    Unavailable = 5,
 }
 
 // A wrapper around LocalPathRepr that is rusqlite-friendly.
@@ -53,7 +53,7 @@ impl FromSql for TimeInSeconds {
         let time = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_secs(seconds as u64))
             .ok_or_else(|| FromSqlError::Other(anyhow!("can't recreate time").into()))?;
-        Ok(TimeInSeconds { 0: time })
+        Ok(TimeInSeconds(time))
     }
 }
 
@@ -72,7 +72,7 @@ impl ToSql for TimeInSeconds {
 
 impl From<SystemTime> for TimeInSeconds {
     fn from(value: SystemTime) -> Self {
-        TimeInSeconds { 0: value }
+        TimeInSeconds(value)
     }
 }
 
@@ -94,7 +94,7 @@ impl FromSql for TimeInMicroseconds {
         let time = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_micros(usecs as u64))
             .ok_or_else(|| FromSqlError::Other(anyhow!("can't recreate time").into()))?;
-        Ok(TimeInMicroseconds { 0: time })
+        Ok(TimeInMicroseconds(time))
     }
 }
 
@@ -113,7 +113,7 @@ impl ToSql for TimeInMicroseconds {
 
 impl From<SystemTime> for TimeInMicroseconds {
     fn from(value: SystemTime) -> Self {
-        TimeInMicroseconds { 0: value }
+        TimeInMicroseconds(value)
     }
 }
 
@@ -131,11 +131,11 @@ impl FromSql for FileState {
     fn column_result(value: types::ValueRef<'_>) -> types::FromSqlResult<Self> {
         match value {
             types::ValueRef::Null => Err(FromSqlError::InvalidType),
-            types::ValueRef::Integer(1) => Ok(FileState::NEW),
-            types::ValueRef::Integer(2) => Ok(FileState::DIRTY),
-            types::ValueRef::Integer(3) => Ok(FileState::BUSY),
-            types::ValueRef::Integer(4) => Ok(FileState::CLEAN),
-            types::ValueRef::Integer(5) => Ok(FileState::UNAVAILABLE),
+            types::ValueRef::Integer(1) => Ok(FileState::New),
+            types::ValueRef::Integer(2) => Ok(FileState::Dirty),
+            types::ValueRef::Integer(3) => Ok(FileState::Busy),
+            types::ValueRef::Integer(4) => Ok(FileState::Clean),
+            types::ValueRef::Integer(5) => Ok(FileState::Unavailable),
             types::ValueRef::Integer(v) => Err(FromSqlError::OutOfRange(v)),
             types::ValueRef::Real(_) => Err(FromSqlError::InvalidType),
             types::ValueRef::Text(_) => Err(FromSqlError::InvalidType),
@@ -159,9 +159,7 @@ impl FromSql for LocalPath {
         let types::ValueRef::Blob(blob) = value else {
             return Err(FromSqlError::InvalidType);
         };
-        Ok(LocalPath {
-            0: LocalPathRepr::new(blob.to_vec()),
-        })
+        Ok(LocalPath(LocalPathRepr::new(blob.to_vec())))
     }
 }
 
@@ -193,7 +191,7 @@ impl TryFrom<LocalPath> for PathBuf {
 
 impl From<LocalPathRepr> for LocalPath {
     fn from(path: LocalPathRepr) -> Self {
-        LocalPath { 0: path }
+        LocalPath(path)
     }
 }
 
@@ -216,7 +214,7 @@ impl FromSql for StoredEncryptionGroup {
         let eg: EncryptionGroup = blob
             .try_into()
             .map_err(|e: anyhow::Error| FromSqlError::Other(e.into()))?;
-        Ok(StoredEncryptionGroup { 0: eg })
+        Ok(StoredEncryptionGroup(eg))
     }
 }
 
@@ -230,7 +228,7 @@ impl ToSql for StoredEncryptionGroup {
 
 impl From<EncryptionGroup> for StoredEncryptionGroup {
     fn from(value: EncryptionGroup) -> Self {
-        StoredEncryptionGroup { 0: value }
+        StoredEncryptionGroup(value)
     }
 }
 
@@ -252,11 +250,11 @@ mod tests {
     #[test]
     fn state_is_reversible() -> anyhow::Result<()> {
         for v in [
-            FileState::NEW,
-            FileState::DIRTY,
-            FileState::BUSY,
-            FileState::CLEAN,
-            FileState::UNAVAILABLE,
+            FileState::New,
+            FileState::Dirty,
+            FileState::Busy,
+            FileState::Clean,
+            FileState::Unavailable,
         ] {
             let ToSqlOutput::Owned(repr) = v.to_sql().context("to_sql")? else {
                 panic!("unexpected")

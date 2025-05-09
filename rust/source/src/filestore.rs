@@ -171,7 +171,7 @@ impl Filestore for Connection {
     /// can impact which files will be backed up in the future.
     fn set_roots(&mut self, roots: &[&Path]) -> anyhow::Result<bool> {
         let mut changed = false; // tracks if any of the roots changed.
-        let mut txn = self.conn.transaction()?;
+        let txn = self.conn.transaction()?;
         let mut old_roots = directory::get_roots(&txn).context("Failed to get current roots")?;
         for root in roots {
             if old_roots.contains_key(*root) {
@@ -183,7 +183,7 @@ impl Filestore for Connection {
             changed = true;
             // The directory is not a root, but might exist nevertheless.
             let root: LocalPath = (*root).to_owned().into();
-            let count = directory::update_root(&mut txn, &root, true)?;
+            let count = directory::update_root(&txn, &root, true)?;
             if count == 0 {
                 directory::add_root(&txn, &root)?;
             }
@@ -192,7 +192,7 @@ impl Filestore for Connection {
             changed = true;
             // We turn the old roots into regular directories. Their cleanup is done as
             // part of a scan, not now.
-            directory::update_root(&mut txn, &old_root.path, false)?;
+            directory::update_root(&txn, &old_root.path, false)?;
         }
         txn.commit()?;
         Ok(changed)
@@ -400,10 +400,10 @@ fn metadata_update(
     fsize: FileSize,
     mtime: TimeInMicroseconds,
 ) -> anyhow::Result<()> {
-    let Some(state) = file::get_state(tx, &path)? else {
+    let Some(state) = file::get_state(tx, path)? else {
         file::new(
             tx,
-            &path,
+            path,
             tree_gen.unwrap_or(0),
             // TODO: order the new files by detection time.
             &SystemTime::UNIX_EPOCH.into(),
@@ -416,14 +416,14 @@ fn metadata_update(
         // We can't leave NEW until we have a hash and egroup. But we should
         // still update the tree_gen to show that the file is still around.
         State::New(_) | State::Dirty(_) | State::Busy(_) => {
-            file::set_state(tx, &path, tree_gen, state.next_hash, &state.state)?;
+            file::set_state(tx, path, tree_gen, state.next_hash, &state.state)?;
         }
         // We might have enough information to know if the file is dirty again.
         State::Clean(clean) => {
             if clean.mtime != mtime || clean.fsize != fsize {
                 file::set_state(
                     tx,
-                    &path,
+                    path,
                     tree_gen,
                     state.next_hash,
                     &State::Dirty(Dirty {
@@ -438,7 +438,7 @@ fn metadata_update(
         // The file may have been readable in the past. For simplicity, treat it as
         // if it was new so we can pick the correct egroup and force a backup.
         State::Unreadable(_) => {
-            file::set_state(tx, &path, tree_gen, state.next_hash, &State::New(New {}))?;
+            file::set_state(tx, path, tree_gen, state.next_hash, &State::New(New {}))?;
         }
     };
     Ok(())

@@ -1,3 +1,4 @@
+// TODO: remove after migrating what might still be useful.
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use filetime::FileTime;
@@ -312,7 +313,7 @@ pub fn read_chunks(path: &Path, chunk_size: usize, chunks: Sender<Bytes>) -> Res
 #[cfg(test)]
 mod tests {
     use filetime::FileTime;
-    use tokio::sync::mpsc::{channel, Receiver};
+    use tokio::sync::mpsc::{Receiver, channel};
 
     use super::*;
     use std::path::Path;

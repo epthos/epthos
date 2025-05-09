@@ -92,7 +92,7 @@ pub fn new(
         "#,
         rusqlite::named_params! {
                 ":path": path,
-                ":state": FileState::NEW,
+                ":state": FileState::New,
                 ":tree_gen": tree_gen,
                 ":next_hash": next_hash,
         },
@@ -135,25 +135,25 @@ pub fn set_state(
     let mut hash = None;
     let mut access_error = None;
     let state = match state {
-        State::New(_) => FileState::NEW,
+        State::New(_) => FileState::New,
         State::Dirty(state) => {
             fsize = Some(&state.fsize);
             mtime = Some(&state.mtime);
             egroup = Some(&state.egroup);
             hash = Some(&state.hash);
-            FileState::DIRTY
+            FileState::Dirty
         }
-        State::Busy(_) => FileState::BUSY,
+        State::Busy(_) => FileState::Busy,
         State::Clean(state) => {
             fsize = Some(&state.fsize);
             mtime = Some(&state.mtime);
             egroup = Some(&state.egroup);
             hash = Some(&state.hash);
-            FileState::CLEAN
+            FileState::Clean
         }
         State::Unreadable(state) => {
             access_error = Some(&state.access_error);
-            FileState::UNAVAILABLE
+            FileState::Unavailable
         }
     };
     let count = txn.execute(
@@ -203,8 +203,8 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
             let egroup: Option<StoredEncryptionGroup> = row.get(6)?;
             let access_error: Option<String> = row.get(7)?;
             let state = match state {
-                FileState::NEW => State::New(New {}),
-                FileState::DIRTY => State::Dirty(Dirty {
+                FileState::New => State::New(New {}),
+                FileState::Dirty => State::Dirty(Dirty {
                     fsize: fsize.ok_or_else(|| {
                         FromSqlError::Other(anyhow!("missing fsize field").into())
                     })?,
@@ -217,9 +217,9 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
                         FromSqlError::Other(anyhow!("missing egroup field").into())
                     })?,
                 }),
-                FileState::BUSY => todo!(),
-                FileState::CLEAN => todo!(),
-                FileState::UNAVAILABLE => State::Unreadable(Unreadable {
+                FileState::Busy => todo!(),
+                FileState::Clean => todo!(),
+                FileState::Unavailable => State::Unreadable(Unreadable {
                     access_error: access_error.ok_or_else(|| {
                         FromSqlError::Other(anyhow!("missing error field").into())
                     })?,
