@@ -3,11 +3,12 @@
 
 use crate::{
     disk::{self, Disk},
-    filestore::{self, Connection, Filestore, HashNext, HashUpdate},
+    filestore::{self, Connection, Filestore, HashNext, HashUpdate, ScanUpdate, Scanner},
     watcher,
 };
-use anyhow::Context;
+use anyhow::{Context, bail};
 use std::{
+    fs::{self, DirEntry},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -92,6 +93,7 @@ impl FileManager {
     }
 }
 
+#[derive(Debug)]
 enum Operation {
     SetRoots(Vec<PathBuf>, Sender<anyhow::Result<()>>),
 }
@@ -156,13 +158,30 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                         tracing::info!("tree scan done, waiting until {:?}", isotime(delay));
                         scan_delay = Some(delay);
                     }
-                    filestore::ScanNext::Next(_dir, _updater) => {
-                        todo!();
+                    filestore::ScanNext::Next(dir, mut updater) => {
+                        tracing::debug!("scanning {:?}", &dir);
+                        match fs::read_dir(&dir) {
+                            Ok(subdirs) => {
+                                let mut complete = true;
+                                for entry in subdirs {
+                                    match scan_entry(entry) {
+                                        Ok(entry) => updater.update(&entry)?,
+                                        Err(_) => complete = false,
+                                    }
+                                }
+                                updater.commit(complete)?;
+                            }
+                            Err(e) => {
+                                updater.error(e)?;
+                            }
+                        }
                     }
                 }
             }
             let scan_sleep = duration_or_zero(now, &scan_delay);
             let hash_sleep = duration_or_zero(now, &hash_delay);
+            let mut poll = tokio::time::interval(Duration::from_millis(1));
+            tracing::debug!("waiting for next action");
             tokio::select! {
                 _ = tokio::time::sleep(scan_sleep), if scan_delay.is_some() => {
                     tracing::info!("ready to start a new tree scan");
@@ -174,7 +193,13 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                 _ = tokio::time::sleep(hash_sleep), if hash_delay.is_some() => {
                     tracing::info!("ready to hash a new file");
                 }
+                _ = poll.tick(), if scan_delay.is_none() || hash_delay.is_none() => {
+                    // If either delay is none, we know that more work can be done right away.
+                    // The artificial delay still allows for pending events (client, watcher)
+                    // to take place.
+                }
                 op = rx.recv() => {
+                    tracing::debug!("handling client operation {:?}", &op);
                     match op {
                         None => break,
                         Some(Operation::SetRoots(roots, tx)) => {
@@ -184,6 +209,7 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                     }
                 }
                 update = self.watcher.next().recv() => {
+                    tracing::debug!("handling watcher operation {:?}", &update);
                     match update {
                         None => {
                             tracing::error!("watcher died...");
@@ -215,6 +241,27 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                 .tree_scan_start(SystemTime::now() + self.scan_period)?;
         }
         Ok(())
+    }
+}
+
+fn scan_entry(entry: std::io::Result<DirEntry>) -> anyhow::Result<ScanUpdate> {
+    let entry = entry.context("invalid entry")?;
+    let file_type = entry.file_type().context("file_type()")?;
+    if file_type.is_file() {
+        let md = entry.metadata().context("metadata")?;
+        Ok(ScanUpdate::File(
+            entry.file_name(),
+            md.len(),
+            md.modified()?,
+        ))
+    } else if file_type.is_dir() {
+        Ok(ScanUpdate::Directory(entry.file_name()))
+    } else if file_type.is_symlink() {
+        // TODO: represent symlinks?
+        bail!("symlinks are not supported yet");
+    } else {
+        tracing::info!("file [{:?}] has unsupported type", &entry);
+        bail!("unsupported entry {:?}", entry);
     }
 }
 
