@@ -235,3 +235,26 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
     .optional()
     .context("get_state")
 }
+
+#[cfg(test)]
+pub mod pth {
+    use super::{File, get_state};
+    use crate::filestore::field::LocalPath;
+
+    use std::path::PathBuf;
+
+    pub fn dump(conn: &mut rusqlite::Connection) -> anyhow::Result<Vec<(PathBuf, File)>> {
+        let txn = conn.transaction()?;
+        let mut stmt = txn.prepare("SELECT path FROM File ORDER BY path")?;
+        let mut result = vec![];
+        for path in stmt.query_map((), |row| {
+            let path: LocalPath = row.get(0)?;
+            Ok(path)
+        })? {
+            let path = path?;
+            let state = get_state(&txn, &path)?.unwrap();
+            result.push((path.try_into()?, state));
+        }
+        Ok(result)
+    }
+}

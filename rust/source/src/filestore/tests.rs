@@ -1,7 +1,7 @@
-use super::{directory::pth, *};
+use super::{directory::pth as dh, file::pth as fh, *};
+use crate::filestore::file::File;
 use anyhow::bail;
 use crypto::model::EncryptionGroup;
-use field::FileState;
 use ring::digest;
 use std::{
     collections::VecDeque,
@@ -14,7 +14,7 @@ use test_log::test;
 fn add_and_remove_roots() -> anyhow::Result<()> {
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
     let got = |cnx: &mut Connection| -> anyhow::Result<Vec<(PathBuf, bool)>> {
-        Ok(pth::dump(cnx.conn())?
+        Ok(dh::dump(cnx.conn())?
             .into_iter()
             .map(|d| (d.path, d.root))
             .collect())
@@ -74,7 +74,7 @@ fn tree_scan() -> anyhow::Result<()> {
     };
     assert_eq!(next, next_time);
 
-    let got: Vec<(PathBuf, u64, u64)> = pth::dump(cnx.conn())?
+    let got: Vec<(PathBuf, u64, u64)> = dh::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.tree_aim, d.tree_gen))
         .collect();
@@ -83,11 +83,18 @@ fn tree_scan() -> anyhow::Result<()> {
         vec![(a.into(), 1, 1), (b.into(), 1, 1), (b.join("e"), 1, 1)]
     );
 
-    let got: Vec<(PathBuf, u64, Option<u64>, Option<SystemTime>)> = fileid_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| (d.path, d.tree_gen, d.fsize, d.mtime))
-        .collect();
-    assert_eq!(got, vec![(a.join("f1"), 1, None, None)]);
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            a.join("f1"),
+            File {
+                tree_gen: 1,
+                next_hash: SystemTime::UNIX_EPOCH.into(),
+                state: State::New(New {})
+            }
+        )]
+    );
     Ok(())
 }
 
@@ -133,7 +140,7 @@ fn tree_rescan() -> anyhow::Result<()> {
     let (_, updater) = updater_or(cnx.tree_scan_next()?)?;
     updater.commit(true)?;
 
-    let got: Vec<(PathBuf, u64, u64)> = pth::dump(cnx.conn())?
+    let got: Vec<(PathBuf, u64, u64)> = dh::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.tree_aim, d.tree_gen))
         .collect();
@@ -147,16 +154,34 @@ fn tree_rescan() -> anyhow::Result<()> {
         ]
     );
 
-    let got: Vec<(PathBuf, u64, Option<u64>, Option<SystemTime>)> = fileid_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| (d.path, d.tree_gen, d.fsize, d.mtime))
-        .collect();
+    let got = fh::dump(cnx.conn())?;
     assert_eq!(
         got,
         vec![
-            (a.join("f1"), 2, None, None),
-            (a.join("f2"), 1, None, None),
-            (a.join("f3"), 2, None, None),
+            (
+                a.join("f1"),
+                File {
+                    tree_gen: 2,
+                    next_hash: SystemTime::UNIX_EPOCH.into(),
+                    state: State::New(New {}),
+                }
+            ),
+            (
+                a.join("f2"),
+                File {
+                    tree_gen: 1,
+                    next_hash: SystemTime::UNIX_EPOCH.into(),
+                    state: State::New(New {}),
+                }
+            ),
+            (
+                a.join("f3"),
+                File {
+                    tree_gen: 2,
+                    next_hash: SystemTime::UNIX_EPOCH.into(),
+                    state: State::New(New {}),
+                }
+            ),
         ]
     );
 
@@ -174,13 +199,9 @@ fn tree_update_drop_is_noop() -> anyhow::Result<()> {
         let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
         updater.update(&ScanUpdate::File("b".into(), 1, SystemTime::UNIX_EPOCH))?;
     }
-    let got: Vec<PathBuf> = fileid_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| d.path)
-        .collect();
     // Despite the update(File()) above, the lack of commit means the db was not
     // altered.
-    assert!(got.is_empty());
+    assert!(fh::dump(cnx.conn())?.is_empty());
 
     Ok(())
 }
@@ -198,7 +219,7 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
         std::io::ErrorKind::PermissionDenied,
         "get out",
     ))?;
-    let got: Vec<(PathBuf, Option<String>)> = pth::dump(cnx.conn())?
+    let got: Vec<(PathBuf, Option<String>)> = dh::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.error))
         .collect();
@@ -220,7 +241,7 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
     };
     assert_eq!(next, SystemTime::UNIX_EPOCH);
 
-    let got: Vec<(PathBuf, Option<String>)> = pth::dump(cnx.conn())?
+    let got: Vec<(PathBuf, Option<String>)> = dh::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.error))
         .collect();
@@ -255,12 +276,19 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
     let (_, updater) = updater_or(cnx.tree_scan_next()?)?;
     updater.commit(true)?;
 
-    let got: Vec<(PathBuf, u64)> = fileid_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| (d.path, d.tree_gen))
-        .collect();
     // "a/b" is currently a directory, so the file gen is stuck at 1.
-    assert_eq!(got, vec![(a.join("b"), 1)]);
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            a.join("b"),
+            File {
+                tree_gen: 1,
+                next_hash: SystemTime::UNIX_EPOCH.into(),
+                state: State::New(New {})
+            }
+        )]
+    );
 
     cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
 
@@ -268,14 +296,21 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
     updater.update(&ScanUpdate::File(b.clone(), 1, b_mod))?;
     updater.commit(true)?;
 
-    let got: Vec<(PathBuf, u64)> = fileid_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| (d.path, d.tree_gen))
-        .collect();
     // The file is back on the scan.
-    assert_eq!(got, vec![(a.join("b"), 3)]);
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            a.join("b"),
+            File {
+                tree_gen: 3,
+                next_hash: SystemTime::UNIX_EPOCH.into(),
+                state: State::New(New {})
+            }
+        )]
+    );
 
-    let got: Vec<(PathBuf, u64, u64)> = pth::dump(cnx.conn())?
+    let got: Vec<(PathBuf, u64, u64)> = dh::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.tree_gen, d.tree_aim))
         .collect();
@@ -342,15 +377,6 @@ fn migrations_test() {
 
 // ===================== HELPERS =======================
 
-#[derive(Debug, PartialEq)]
-struct FullFile {
-    path: PathBuf,
-    state: FileState,
-    tree_gen: u64,
-    fsize: Option<FileSize>,
-    mtime: Option<SystemTime>,
-}
-
 fn updater_or<U: Scanner>(next: ScanNext<U>) -> anyhow::Result<(PathBuf, U)> {
     match next {
         ScanNext::Done(_) => bail!("no next directory"),
@@ -363,29 +389,6 @@ fn hasher_or(next: HashNext) -> anyhow::Result<PathBuf> {
         HashNext::Done(_) => bail!("no next file to hash"),
         HashNext::Next(file) => Ok(file),
     }
-}
-
-fn fileid_dump(conn: &mut rusqlite::Connection) -> anyhow::Result<Vec<FullFile>> {
-    let mut result = vec![];
-    let mut stmt =
-        conn.prepare("SELECT path, state, tree_gen, fsize, mtime FROM File ORDER BY path")?;
-    for row in stmt
-        .query_map((), |row| {
-            let path: LocalPath = row.get(0)?;
-            let mtime: Option<TimeInMicroseconds> = row.get(4)?;
-            Ok(FullFile {
-                path: path.try_into()?,
-                state: row.get(1)?,
-                tree_gen: row.get(2)?,
-                fsize: row.get(3)?,
-                mtime: mtime.and_then(|t| Some(*t)),
-            })
-        })
-        .context("Faild to list Files")?
-    {
-        result.push(row?);
-    }
-    Ok(result)
 }
 
 fn fileid(b: u8) -> EncryptionGroup {
