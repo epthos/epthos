@@ -174,25 +174,25 @@ impl Filestore for Connection {
         let txn = self.conn.transaction()?;
         let mut old_roots = directory::get_roots(&txn).context("Failed to get current roots")?;
         for root in roots {
-            if old_roots.contains_key(*root) {
+            let root: LocalPath = (*root).to_owned().into();
+            if old_roots.contains(&root) {
                 // The directory exists and is already a root. Just ensure we don't delete
                 // it at the end.
-                old_roots.remove(*root);
+                old_roots.remove(&root);
                 continue;
             }
             changed = true;
             // The directory is not a root, but might exist nevertheless.
-            let root: LocalPath = (*root).to_owned().into();
             let count = directory::update_root(&txn, &root, true)?;
             if count == 0 {
                 directory::add_root(&txn, &root)?;
             }
         }
-        for old_root in old_roots.into_values() {
+        for old_root in old_roots {
             changed = true;
             // We turn the old roots into regular directories. Their cleanup is done as
             // part of a scan, not now.
-            directory::update_root(&txn, &old_root.path, false)?;
+            directory::update_root(&txn, &old_root, false)?;
         }
         txn.commit()?;
         Ok(changed)

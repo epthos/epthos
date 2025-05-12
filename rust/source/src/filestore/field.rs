@@ -28,7 +28,7 @@ pub enum FileState {
 }
 
 // A wrapper around LocalPathRepr that is rusqlite-friendly.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct LocalPath(LocalPathRepr);
 
 // A wrapper around a SystemTime that will store it in seconds.

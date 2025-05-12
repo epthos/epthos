@@ -1,4 +1,4 @@
-use super::*;
+use super::{directory::pth, *};
 use anyhow::bail;
 use crypto::model::EncryptionGroup;
 use field::FileState;
@@ -11,51 +11,25 @@ use std::{
 use test_log::test;
 
 #[test]
-fn set_roots_is_stable() -> anyhow::Result<()> {
+fn add_and_remove_roots() -> anyhow::Result<()> {
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let got = |cnx: &mut Connection| -> anyhow::Result<Vec<(PathBuf, bool)>> {
+        Ok(pth::dump(cnx.conn())?
+            .into_iter()
+            .map(|d| (d.path, d.root))
+            .collect())
+    };
+
     let p1 = Path::new("/a/b");
     let p2 = Path::new("/c/d");
-    let c1 = cnx.set_roots(&[p1])?;
-    let c2 = cnx.set_roots(&[p1, p2])?;
-    assert!(c1);
-    assert!(c2);
+    assert!(cnx.set_roots(&[p1])?);
+    assert_eq!(got(&mut cnx)?, vec![(p1.into(), true),]);
 
-    let got: Vec<(PathBuf, bool)> = directory_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| (d.path, d.root))
-        .collect();
-    assert_eq!(got, vec![(p1.into(), true), (p2.into(), true),]);
-    Ok(())
-}
+    assert!(cnx.set_roots(&[p1, p2])?);
+    assert_eq!(got(&mut cnx)?, vec![(p1.into(), true), (p2.into(), true),]);
 
-#[test]
-fn set_roots_removes_old_roots() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
-    let p1 = Path::new("/a/b");
-    let p2 = Path::new("/c/d");
-    let c1 = cnx.set_roots(&[p1]).context("Can't set p1")?;
-    let c2 = cnx.set_roots(&[p2]).context("Can't set p2")?;
-    assert!(c1);
-    assert!(c2);
-
-    let got: Vec<(PathBuf, bool)> = directory_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| (d.path, d.root))
-        .collect();
-    // not root anymore
-    assert_eq!(got, vec![(p1.into(), false), (p2.into(), true),]);
-
-    // We can also revert back
-    let c3 = cnx.set_roots(&[p1])?;
-    assert!(c3);
-
-    let got: Vec<(PathBuf, bool)> = directory_dump(cnx.conn())?
-        .into_iter()
-        .map(|d| (d.path, d.root))
-        .collect();
-    // root again!
-    assert_eq!(got, vec![(p1.into(), true), (p2.into(), false),]);
-
+    assert!(cnx.set_roots(&[p1])?);
+    assert_eq!(got(&mut cnx)?, vec![(p1.into(), true), (p2.into(), false),]);
     Ok(())
 }
 
@@ -100,7 +74,7 @@ fn tree_scan() -> anyhow::Result<()> {
     };
     assert_eq!(next, next_time);
 
-    let got: Vec<(PathBuf, u64, u64)> = directory_dump(cnx.conn())?
+    let got: Vec<(PathBuf, u64, u64)> = pth::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.tree_aim, d.tree_gen))
         .collect();
@@ -159,7 +133,7 @@ fn tree_rescan() -> anyhow::Result<()> {
     let (_, updater) = updater_or(cnx.tree_scan_next()?)?;
     updater.commit(true)?;
 
-    let got: Vec<(PathBuf, u64, u64)> = directory_dump(cnx.conn())?
+    let got: Vec<(PathBuf, u64, u64)> = pth::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.tree_aim, d.tree_gen))
         .collect();
@@ -224,7 +198,7 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
         std::io::ErrorKind::PermissionDenied,
         "get out",
     ))?;
-    let got: Vec<(PathBuf, Option<String>)> = directory_dump(cnx.conn())?
+    let got: Vec<(PathBuf, Option<String>)> = pth::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.error))
         .collect();
@@ -246,7 +220,7 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
     };
     assert_eq!(next, SystemTime::UNIX_EPOCH);
 
-    let got: Vec<(PathBuf, Option<String>)> = directory_dump(cnx.conn())?
+    let got: Vec<(PathBuf, Option<String>)> = pth::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.error))
         .collect();
@@ -301,7 +275,7 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
     // The file is back on the scan.
     assert_eq!(got, vec![(a.join("b"), 3)]);
 
-    let got: Vec<(PathBuf, u64, u64)> = directory_dump(cnx.conn())?
+    let got: Vec<(PathBuf, u64, u64)> = pth::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.tree_gen, d.tree_aim))
         .collect();
@@ -369,15 +343,6 @@ fn migrations_test() {
 // ===================== HELPERS =======================
 
 #[derive(Debug, PartialEq)]
-struct FullDirectory {
-    path: PathBuf,
-    root: bool,
-    tree_gen: u64,
-    tree_aim: u64,
-    error: Option<String>,
-}
-
-#[derive(Debug, PartialEq)]
 struct FullFile {
     path: PathBuf,
     state: FileState,
@@ -398,29 +363,6 @@ fn hasher_or(next: HashNext) -> anyhow::Result<PathBuf> {
         HashNext::Done(_) => bail!("no next file to hash"),
         HashNext::Next(file) => Ok(file),
     }
-}
-
-fn directory_dump(conn: &mut rusqlite::Connection) -> anyhow::Result<Vec<FullDirectory>> {
-    let mut result = vec![];
-    let mut stmt = conn.prepare(
-        "SELECT path, root, tree_aim, tree_gen, access_error FROM Directory ORDER BY path",
-    )?;
-    for row in stmt
-        .query_map((), |row| {
-            let path: LocalPath = row.get(0)?;
-            Ok(FullDirectory {
-                path: path.try_into()?,
-                root: row.get(1)?,
-                tree_aim: row.get(2)?,
-                tree_gen: row.get(3)?,
-                error: row.get(4)?,
-            })
-        })
-        .context("Failed to list directories")?
-    {
-        result.push(row?);
-    }
-    Ok(result)
 }
 
 fn fileid_dump(conn: &mut rusqlite::Connection) -> anyhow::Result<Vec<FullFile>> {
