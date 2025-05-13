@@ -1,5 +1,6 @@
-use super::field::{
-    FileState, LocalPath, StoredEncryptionGroup, TimeInMicroseconds, TimeInSeconds,
+use super::{
+    Snapshot,
+    field::{FileState, LocalPath, StoredEncryptionGroup, TimeInMicroseconds, TimeInSeconds},
 };
 use crate::model::FileSize;
 use anyhow::{Context, anyhow};
@@ -29,6 +30,8 @@ CREATE TABLE File (
 
     access_error TEXT
 ) STRICT, WITHOUT ROWID;
+
+CREATE INDEX FileHash ON File(hash);
 "#,
 );
 
@@ -234,6 +237,27 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
     )
     .optional()
     .context("get_state")
+}
+
+pub fn matching_egroup(
+    txn: &Transaction,
+    snapshot: &Snapshot,
+) -> anyhow::Result<Option<StoredEncryptionGroup>> {
+    txn.query_row(
+        r#"
+            SELECT
+              egroup
+            FROM File WHERE hash = :hash AND fsize = :fsize
+            LIMIT 1
+        "#,
+        rusqlite::named_params! {":fsize": snapshot.fsize, ":hash": snapshot.hash.as_ref()},
+        |row| {
+            let egroup: StoredEncryptionGroup = row.get(0)?;
+            Ok(egroup)
+        },
+    )
+    .optional()
+    .context("matching_egroup")
 }
 
 #[cfg(test)]

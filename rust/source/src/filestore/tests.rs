@@ -60,8 +60,8 @@ fn tree_scan() -> anyhow::Result<()> {
     let (dir, mut updater) = updater_or(cnx.tree_scan_next()?)?;
     assert_eq!(dir, b);
 
-    let p3: OsString = "e".into();
-    updater.update(&ScanUpdate::Directory(p3))?;
+    let e: OsString = "e".into();
+    updater.update(&ScanUpdate::Directory(e))?;
     updater.commit(true)?;
 
     let (dir, updater) = updater_or(cnx.tree_scan_next()?)?;
@@ -322,7 +322,8 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
 
 #[test]
 fn hash_next() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let egroup = fileid(1);
+    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
 
     let delta = Duration::from_secs(10);
     let now = SystemTime::UNIX_EPOCH + delta;
@@ -331,7 +332,7 @@ fn hash_next() -> anyhow::Result<()> {
     let HashNext::Done(next) = cnx.hash_next(now)? else {
         panic!("unexpected")
     };
-    assert_eq!(next, now + FILE_NEXT_DELAY);
+    assert_eq!(next, now + FILE_NEXT_DELAY); // Arbitrary delay until we get files.
 
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
@@ -344,19 +345,23 @@ fn hash_next() -> anyhow::Result<()> {
     updater.commit(true)?;
 
     // From now on, file a/f1 is in the database, but with no hash yet.
+    let f1 = a.join("f1");
     let file = hasher_or(cnx.hash_next(now)?)?;
-    assert_eq!(file, a.join("f1"));
+    assert_eq!(&file, &f1);
 
     let file = hasher_or(cnx.hash_next(now)?)?;
-    assert_eq!(file, a.join("f1"));
+    assert_eq!(&file, &f1);
 
+    let fsize = 100;
+    let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+    let hash = digest::digest(&digest::SHA256, b"boo");
     cnx.hash_update(
         file,
         now + delta,
         HashUpdate::Hash(Snapshot {
-            fsize: 100,
-            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
-            hash: digest::digest(&digest::SHA256, b"boo"),
+            fsize,
+            mtime: mtime.clone(),
+            hash: hash.clone(),
         }),
     )?;
 
@@ -367,6 +372,165 @@ fn hash_next() -> anyhow::Result<()> {
     };
     assert_eq!(next, now + delta);
 
+    // Confirm that the file is now dirty as intended.
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            f1,
+            File {
+                tree_gen: 1,
+                next_hash: (now + delta).into(),
+                state: State::Dirty(Dirty {
+                    fsize,
+                    mtime: mtime.into(),
+                    hash: hash.as_ref().to_owned(),
+                    egroup: egroup.into(),
+                })
+            }
+        )]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn small_files_dont_share_egroups() -> anyhow::Result<()> {
+    let eg1 = fileid(1);
+    let eg2 = fileid(2);
+    let mut cnx =
+        Connection::new_in_memory(Arc::new(FakeRandom::new(vec![eg1.clone(), eg2.clone()])))?;
+    let a = Path::new("a");
+    cnx.set_roots(&[a])?;
+    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
+    updater.update(&ScanUpdate::File("f1".into(), 1, SystemTime::UNIX_EPOCH))?;
+    updater.update(&ScanUpdate::File("f2".into(), 1, SystemTime::UNIX_EPOCH))?;
+    updater.commit(true)?;
+
+    let fsize = 100;
+    let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+    let hash = digest::digest(&digest::SHA256, b"boo");
+    cnx.hash_update(
+        a.join("f1"),
+        SystemTime::UNIX_EPOCH,
+        HashUpdate::Hash(Snapshot {
+            fsize,
+            mtime: mtime.clone(),
+            hash: hash.clone(),
+        }),
+    )?;
+    cnx.hash_update(
+        a.join("f2"),
+        SystemTime::UNIX_EPOCH,
+        HashUpdate::Hash(Snapshot {
+            fsize,
+            mtime: mtime.clone(),
+            hash: hash.clone(),
+        }),
+    )?;
+
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![
+            (
+                a.join("f1"),
+                File {
+                    tree_gen: 1,
+                    next_hash: SystemTime::UNIX_EPOCH.into(),
+                    state: State::Dirty(Dirty {
+                        fsize,
+                        mtime: mtime.into(),
+                        hash: hash.as_ref().to_owned(),
+                        egroup: eg1.into(),
+                    })
+                }
+            ),
+            (
+                a.join("f2"),
+                File {
+                    tree_gen: 1,
+                    next_hash: SystemTime::UNIX_EPOCH.into(),
+                    state: State::Dirty(Dirty {
+                        fsize,
+                        mtime: mtime.into(),
+                        hash: hash.as_ref().to_owned(),
+                        egroup: eg2.into(),
+                    })
+                }
+            )
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn large_identical_files_share_egroups() -> anyhow::Result<()> {
+    let egroup = fileid(1);
+    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
+    let a = Path::new("a");
+    cnx.set_roots(&[a])?;
+    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    let (_, mut updater) = updater_or(cnx.tree_scan_next()?)?;
+    updater.update(&ScanUpdate::File("f1".into(), 1, SystemTime::UNIX_EPOCH))?;
+    updater.update(&ScanUpdate::File("f2".into(), 1, SystemTime::UNIX_EPOCH))?;
+    updater.commit(true)?;
+
+    let fsize = 2 * SMALLEST_INDEPENDENT_FILE;
+    let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+    let hash = digest::digest(&digest::SHA256, b"boo");
+    cnx.hash_update(
+        a.join("f1"),
+        SystemTime::UNIX_EPOCH,
+        HashUpdate::Hash(Snapshot {
+            fsize,
+            mtime: mtime.clone(),
+            hash: hash.clone(),
+        }),
+    )?;
+    cnx.hash_update(
+        a.join("f2"),
+        SystemTime::UNIX_EPOCH,
+        HashUpdate::Hash(Snapshot {
+            fsize,
+            mtime: mtime.clone(),
+            hash: hash.clone(),
+        }),
+    )?;
+
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![
+            (
+                a.join("f1"),
+                File {
+                    tree_gen: 1,
+                    next_hash: SystemTime::UNIX_EPOCH.into(),
+                    state: State::Dirty(Dirty {
+                        fsize,
+                        mtime: mtime.into(),
+                        hash: hash.as_ref().to_owned(),
+                        egroup: egroup.clone().into(),
+                    })
+                }
+            ),
+            (
+                a.join("f2"),
+                File {
+                    tree_gen: 1,
+                    next_hash: SystemTime::UNIX_EPOCH.into(),
+                    state: State::Dirty(Dirty {
+                        fsize,
+                        mtime: mtime.into(),
+                        hash: hash.as_ref().to_owned(),
+                        egroup: egroup.into(),
+                    })
+                }
+            )
+        ]
+    );
     Ok(())
 }
 

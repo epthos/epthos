@@ -4,8 +4,10 @@
 //! to ensure testability and isolation.
 use crate::model::{FileSize, ModificationTime};
 use anyhow::Context;
-use field::{LocalPath, TimeInMicroseconds, TimeInSeconds};
+use crypto::SharedRandom;
+use field::{LocalPath, StoredEncryptionGroup, TimeInMicroseconds, TimeInSeconds};
 use file::{Dirty, New, State, Unreadable};
+use rusqlite::Transaction;
 use rusqlite_migration::Migrations;
 use settings::Setting;
 use std::{
@@ -134,6 +136,8 @@ impl std::fmt::Debug for UpdaterImpl<'_> {
             .finish_non_exhaustive()
     }
 }
+
+const SMALLEST_INDEPENDENT_FILE: u64 = 1024;
 
 const SETTING_TREE_GEN: &str = "tree-gen";
 const SETTING_NEXT_RUN: &str = "next-run";
@@ -283,7 +287,7 @@ impl Filestore for Connection {
         let Some(current) = file::get_state(&tx, &file_repr)? else {
             anyhow::bail!("file [{:?}] is expected to be in db", &file_repr);
         };
-        match update {
+        match &update {
             HashUpdate::Hash(snapshot) => {
                 match current.state {
                     // Either NEW or UNREADABLE deserve a shot at a backup once we have
@@ -300,7 +304,7 @@ impl Filestore for Connection {
                                 hash: snapshot.hash.as_ref().to_owned(),
                                 // TODO: we probably want to reuse the same egroup when
                                 // going from UNREADABLE back to readable?
-                                egroup: self.rand.generate_file_id()?.into(),
+                                egroup: pick_egroup(&tx, snapshot, self.rand.clone())?,
                             }),
                         )?;
                     }
@@ -391,6 +395,25 @@ impl Scanner for UpdaterImpl<'_> {
         self.tx.commit()?;
         Ok(())
     }
+}
+
+fn pick_egroup(
+    tx: &Transaction,
+    snapshot: &Snapshot,
+    rand: SharedRandom,
+) -> anyhow::Result<StoredEncryptionGroup> {
+    if snapshot.fsize < SMALLEST_INDEPENDENT_FILE {
+        // Isolate small files. They don't really represent a big savings
+        // opportunity, and this avoids weird cases of small files growing
+        // which start as identical but diverge quickly, still being in the
+        // same egroup.
+        return Ok(rand.generate_file_id()?.into());
+    }
+    let egroup = match file::matching_egroup(tx, snapshot)? {
+        Some(egroup) => egroup,
+        None => rand.generate_file_id()?.into(),
+    };
+    Ok(egroup)
 }
 
 fn metadata_update(
