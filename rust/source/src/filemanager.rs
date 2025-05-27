@@ -3,7 +3,7 @@
 
 use crate::{
     disk::{self, Disk},
-    filestore::{self, Connection, Filestore, HashNext, HashUpdate, ScanUpdate, Scanner},
+    filestore::{self, Connection, Filestore, HashUpdate, Next, ScanUpdate, Scanner},
     watcher,
 };
 use anyhow::{Context, bail};
@@ -121,14 +121,18 @@ fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
     }
 }
 
-// Arbitrary size limit on the number of recently modified files.
 const HASH_DELAY: Duration = Duration::from_secs(3600);
+const BACKUP_DELAY: Duration = Duration::from_secs(300);
 
 // The agent side of the manager. Holds the mutable store and watcher, and
 // performs the dispatching logic.
 impl<S: Filestore, D: Disk> Runner<S, D> {
     async fn run(&mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
         tracing::info!("FileManager starting");
+
+        // TODO: ensure those backups are known to the backup layer.
+        let _ = self.store.backup_pending()?;
+
         let mut scan_delay: Option<SystemTime> = None;
         // The work loop will continuously refresh the filesystem when a scan is
         // active, hash files that haven't changed in a while, and otherwise respond
@@ -139,26 +143,38 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
             // independently of timing.
             let mut hash_delay: Option<SystemTime> = None;
             match self.store.hash_next(now)? {
-                HashNext::Next(file) => {
+                Next::Next(file, ()) => {
                     tracing::debug!("hashing stale file {:?}", &file);
                     let update = match self.disk.snapshot(&file) {
                         Ok(snapshot) => HashUpdate::Hash(snapshot),
                         Err(err) => HashUpdate::Unreadable(err),
                     };
-                    self.store.hash_update(file, now + HASH_DELAY, update)?;
+                    self.store
+                        .hash_update(file, now + HASH_DELAY, now + BACKUP_DELAY, update)?;
                 }
-                HashNext::Done(delay) => {
+                Next::Done(delay) => {
                     tracing::debug!("no next file to hash, waiting until {:?}", isotime(delay));
                     hash_delay = Some(delay);
                 }
             }
+            let mut backup_delay: Option<SystemTime> = None;
+            match self.store.backup_next(now)? {
+                Next::Next(path, _egroup) => {
+                    // TODO: enqueue backup.
+                    self.store.backup_start(path)?;
+                }
+                Next::Done(delay) => {
+                    tracing::debug!("no next file to backup, waiting until {:?}", isotime(delay));
+                    backup_delay = Some(delay);
+                }
+            }
             if scan_delay.is_none() {
                 match self.store.tree_scan_next()? {
-                    filestore::ScanNext::Done(delay) => {
+                    filestore::Next::Done(delay) => {
                         tracing::info!("tree scan done, waiting until {:?}", isotime(delay));
                         scan_delay = Some(delay);
                     }
-                    filestore::ScanNext::Next(dir, mut updater) => {
+                    filestore::Next::Next(dir, mut updater) => {
                         tracing::debug!("scanning {:?}", &dir);
                         match fs::read_dir(&dir) {
                             Ok(subdirs) => {
@@ -180,6 +196,7 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
             }
             let scan_sleep = duration_or_zero(now, &scan_delay);
             let hash_sleep = duration_or_zero(now, &hash_delay);
+            let back_sleep = duration_or_zero(now, &backup_delay);
             let mut poll = tokio::time::interval(Duration::from_millis(1));
             tracing::debug!("waiting for next action");
             tokio::select! {
@@ -192,6 +209,9 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                 }
                 _ = tokio::time::sleep(hash_sleep), if hash_delay.is_some() => {
                     tracing::info!("ready to hash a new file");
+                }
+                _ = tokio::time::sleep(back_sleep), if backup_delay.is_some() => {
+                    tracing::info!("ready to backup a new file");
                 }
                 _ = poll.tick(), if scan_delay.is_none() || hash_delay.is_none() => {
                     // If either delay is none, we know that more work can be done right away.
@@ -220,7 +240,7 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                         Some(watcher::Update::File(path)) => {
                             tracing::debug!("Received watcher: {:?}", &path);
                             if let Ok((fsize, mtime)) = self.disk.metadata(&path) {
-                                self.store.metadata_update(path, fsize, mtime)?;
+                                self.store.metadata_update(path, now, fsize, mtime)?;
                             }
                         },
                     }
@@ -251,6 +271,7 @@ fn scan_entry(entry: std::io::Result<DirEntry>) -> anyhow::Result<ScanUpdate> {
         let md = entry.metadata().context("metadata")?;
         Ok(ScanUpdate::File(
             entry.file_name(),
+            SystemTime::now(),
             md.len(),
             md.modified()?,
         ))
@@ -278,9 +299,10 @@ where
 mod test {
     use super::*;
     use crate::{
-        filestore::{self, HashNext, HashUpdate},
+        filestore::{self, HashUpdate, Next},
         model::{FileSize, ModificationTime},
     };
+    use crypto::model::EncryptionGroup;
     use std::{
         collections::{HashSet, VecDeque},
         path::PathBuf,
@@ -460,20 +482,20 @@ mod test {
             Ok(())
         }
 
-        fn hash_next(&mut self, now: SystemTime) -> anyhow::Result<filestore::HashNext> {
-            Ok(HashNext::Done(now + Duration::from_secs(10)))
+        fn hash_next(&mut self, now: SystemTime) -> anyhow::Result<Next<()>> {
+            Ok(Next::Done(now + Duration::from_secs(10)))
         }
 
-        fn tree_scan_next(&mut self) -> anyhow::Result<filestore::ScanNext<Self::Scanner<'_>>> {
+        fn tree_scan_next(&mut self) -> anyhow::Result<Next<Self::Scanner<'_>>> {
             let state = self.state.lock().unwrap();
             if state.dirs_to_scan.is_empty() {
                 tracing::info!("scan is done");
-                Ok(filestore::ScanNext::Done(state.next_scan))
+                Ok(filestore::Next::Done(state.next_scan))
             } else {
                 // Keep returning the same element until we get an update for it.
                 let next = state.dirs_to_scan.front().unwrap().clone();
                 tracing::info!("returning next directory {:?}", &next);
-                Ok(filestore::ScanNext::Next(next, FakeUpdater {}))
+                Ok(filestore::Next::Next(next, FakeUpdater {}))
             }
         }
 
@@ -481,6 +503,7 @@ mod test {
             &mut self,
             _file: PathBuf,
             _next: SystemTime,
+            _soon: SystemTime,
             _update: HashUpdate,
         ) -> anyhow::Result<()> {
             todo!()
@@ -489,8 +512,32 @@ mod test {
         fn metadata_update(
             &mut self,
             _path: PathBuf,
+            _now: SystemTime,
             _fsize: FileSize,
             _mtime: ModificationTime,
+        ) -> anyhow::Result<()> {
+            todo!()
+        }
+
+        fn backup_next(&mut self, _now: SystemTime) -> anyhow::Result<Next<EncryptionGroup>> {
+            Ok(Next::Done(_now + Duration::from_secs(1)))
+        }
+
+        fn backup_start(&mut self, _path: PathBuf) -> anyhow::Result<()> {
+            todo!()
+        }
+
+        fn backup_pending(
+            &mut self,
+        ) -> anyhow::Result<Vec<(PathBuf, crypto::model::EncryptionGroup)>> {
+            Ok(vec![])
+        }
+
+        fn backup_done(
+            &mut self,
+            _path: PathBuf,
+            _next: SystemTime,
+            _update: HashUpdate,
         ) -> anyhow::Result<()> {
             todo!()
         }

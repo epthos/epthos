@@ -67,7 +67,7 @@ pub fn get(txn: &rusqlite::Transaction, key: &str) -> anyhow::Result<Option<Sett
                     return Ok(Setting::T(s));
                 }
                 if let Some(ts) = ts {
-                    return Ok(Setting::Ts(*ts));
+                    return Ok(Setting::Ts(ts.into_inner()));
                 }
                 Err(rusqlite::Error::ToSqlConversionFailure(
                     anyhow!("Setting has no value set").into(),

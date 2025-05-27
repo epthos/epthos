@@ -3,7 +3,6 @@ use crypto::model::EncryptionGroup;
 use platform::LocalPathRepr;
 use rusqlite::types::{self, FromSql, FromSqlError, ToSql, ValueRef};
 use std::{
-    ops::Deref,
     path::PathBuf,
     time::{Duration, SystemTime},
 };
@@ -24,7 +23,7 @@ pub enum FileState {
     // is now clean.
     Clean = 4,
     // The file cannot be read or stat'd.
-    Unavailable = 5,
+    Unreadable = 5,
 }
 
 // A wrapper around LocalPathRepr that is rusqlite-friendly.
@@ -32,12 +31,12 @@ pub enum FileState {
 pub struct LocalPath(LocalPathRepr);
 
 // A wrapper around a SystemTime that will store it in seconds.
-#[derive(Debug, PartialEq)]
-pub struct TimeInSeconds(SystemTime);
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub struct TimeInSeconds(pub SystemTime);
 
 // A wrapper around a SystemTime that will store it in microseconds.
-#[derive(Debug, PartialEq)]
-pub struct TimeInMicroseconds(SystemTime);
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub struct TimeInMicroseconds(pub SystemTime);
 
 // A wrapper around an EncryptionGroup
 #[derive(Debug, PartialEq)]
@@ -76,11 +75,9 @@ impl From<SystemTime> for TimeInSeconds {
     }
 }
 
-impl Deref for TimeInSeconds {
-    type Target = SystemTime;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl TimeInSeconds {
+    pub fn into_inner(self) -> SystemTime {
+        self.0
     }
 }
 
@@ -117,11 +114,10 @@ impl From<SystemTime> for TimeInMicroseconds {
     }
 }
 
-impl Deref for TimeInMicroseconds {
-    type Target = SystemTime;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl TimeInMicroseconds {
+    #[allow(dead_code)]
+    pub fn into_inner(self) -> SystemTime {
+        self.0
     }
 }
 
@@ -135,7 +131,7 @@ impl FromSql for FileState {
             types::ValueRef::Integer(2) => Ok(FileState::Dirty),
             types::ValueRef::Integer(3) => Ok(FileState::Busy),
             types::ValueRef::Integer(4) => Ok(FileState::Clean),
-            types::ValueRef::Integer(5) => Ok(FileState::Unavailable),
+            types::ValueRef::Integer(5) => Ok(FileState::Unreadable),
             types::ValueRef::Integer(v) => Err(FromSqlError::OutOfRange(v)),
             types::ValueRef::Real(_) => Err(FromSqlError::InvalidType),
             types::ValueRef::Text(_) => Err(FromSqlError::InvalidType),
@@ -195,11 +191,9 @@ impl From<LocalPathRepr> for LocalPath {
     }
 }
 
-impl Deref for LocalPath {
-    type Target = LocalPathRepr;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl LocalPath {
+    pub fn into_inner(self) -> LocalPathRepr {
+        self.0
     }
 }
 
@@ -232,11 +226,9 @@ impl From<EncryptionGroup> for StoredEncryptionGroup {
     }
 }
 
-impl Deref for StoredEncryptionGroup {
-    type Target = EncryptionGroup;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl StoredEncryptionGroup {
+    pub fn into_inner(self) -> EncryptionGroup {
+        self.0
     }
 }
 
@@ -254,7 +246,7 @@ mod tests {
             FileState::Dirty,
             FileState::Busy,
             FileState::Clean,
-            FileState::Unavailable,
+            FileState::Unreadable,
         ] {
             let ToSqlOutput::Owned(repr) = v.to_sql().context("to_sql")? else {
                 panic!("unexpected")
