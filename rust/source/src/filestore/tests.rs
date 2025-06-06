@@ -4,7 +4,7 @@ use anyhow::bail;
 use crypto::model::EncryptionGroup;
 use ring::digest;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -54,7 +54,7 @@ fn tree_scan() -> anyhow::Result<()> {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(3210);
 
     let f1: OsString = "f1".into();
-    let f1_modtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+    let f1_modtime = t(1000);
     updater.update(&ScanUpdate::File(f1, now, 100, f1_modtime))?;
     updater.commit(true)?;
 
@@ -611,8 +611,47 @@ fn metadata_update_adds_file() -> anyhow::Result<()> {
 }
 
 #[test]
+fn metadata_always_advance_tree_gen() -> anyhow::Result<()> {
+    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![])))?;
+
+    let root = PathBuf::from("r");
+    let file = root.join("new");
+
+    cnx.set_roots(&[&root])?;
+
+    let hash_next = secs(33);
+    let last_tree_gen = db_setup(
+        cnx.conn(),
+        vec![HashMap::from([(
+            file.clone(),
+            State::New(New { next: hash_next }),
+        )])],
+    )?;
+
+    let scan_next = t(100);
+    cnx.tree_scan_start(t(200))?;
+    let (_, mut updater) = cnx.tree_scan_next()?.next()?;
+    let f1: OsString = "new".into();
+    updater.update(&ScanUpdate::File(f1, scan_next, 100, t(321)))?;
+    updater.commit(true)?;
+
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            file,
+            File {
+                tree_gen: last_tree_gen + 1,
+                state: State::New(New { next: hash_next })
+            }
+        )]
+    );
+    Ok(())
+}
+
+#[test]
 fn full_cycle() -> anyhow::Result<()> {
-    // Take a file through all its positiev states (not including unreadable).
+    // Take a file through all its positive states (not including unreadable).
 
     let egroup = fileid(1);
     let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
@@ -733,6 +772,37 @@ fn migrations_test() {
 }
 
 // ===================== HELPERS =======================
+
+fn t(secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+fn secs(secs: u64) -> TimeInSeconds {
+    t(secs).into()
+}
+
+fn db_setup(
+    conn: &mut rusqlite::Connection,
+    contents: Vec<HashMap<PathBuf, State>>,
+) -> anyhow::Result<i64> {
+    let txn = conn.transaction()?;
+    let mut tree_gen = settings::get_int(&txn, "tree-gen")?.unwrap_or(0);
+    for values in contents {
+        tree_gen += 1;
+        for (path, state) in values {
+            let path: LocalPath = path.into();
+            // set_state() won't insert by design. So we must ensure the file
+            // exists first.
+            if file::get_state(&txn, &path)?.is_none() {
+                file::new(&txn, &path, tree_gen, &secs(0))?
+            }
+            file::set_state(&txn, &path, tree_gen, &state)?;
+        }
+    }
+    settings::set(&txn, "tree-gen", &Setting::N(tree_gen))?;
+    txn.commit()?;
+    Ok(tree_gen)
+}
 
 fn fileid(b: u8) -> EncryptionGroup {
     let bytes: [u8; crypto::model::ENCRYPTION_GROUP_LEN] = [b, 0, 0, 0, 0, 0];

@@ -109,6 +109,7 @@ pub enum Next<Extra> {
 /// What is the next update to the directory?
 #[derive(Debug)]
 pub enum ScanUpdate {
+    /// (file name, time to next operation, file size, modification time)
     File(OsString, SystemTime, FileSize, ModificationTime),
     Directory(OsString),
 }
@@ -379,14 +380,14 @@ impl Filestore for Connection {
     fn metadata_update(
         &mut self,
         path: PathBuf,
-        now: SystemTime,
+        next: SystemTime,
         fsize: FileSize,
         mtime: ModificationTime,
     ) -> anyhow::Result<()> {
         let file_repr: LocalPath = path.into();
         let mtime: TimeInMicroseconds = mtime.into();
         let mut tx = self.conn.transaction()?;
-        metadata_update(&mut tx, &file_repr, now.into(), None, fsize, mtime)?;
+        metadata_update(&mut tx, &file_repr, next.into(), None, fsize, mtime)?;
         tx.commit()?;
         Ok(())
     }
@@ -484,13 +485,13 @@ impl Scanner for UpdaterImpl<'_> {
                     directory::insert(&self.tx, &path, self.aim)?;
                 }
             }
-            ScanUpdate::File(file, now, fsize, mtime) => {
+            ScanUpdate::File(file, next, fsize, mtime) => {
                 let path: LocalPath = dir.join(file).into();
                 let mtime: TimeInMicroseconds = (*mtime).into();
                 metadata_update(
                     &mut self.tx,
                     &path,
-                    now.clone().into(),
+                    next.clone().into(),
                     Some(self.aim),
                     *fsize,
                     mtime,
@@ -535,45 +536,40 @@ fn pick_egroup(
 fn metadata_update(
     tx: &mut rusqlite::Transaction,
     path: &LocalPath,
-    now: TimeInSeconds,
+    next: TimeInSeconds,
     tree_gen: Option<i64>,
     fsize: FileSize,
     mtime: TimeInMicroseconds,
 ) -> anyhow::Result<()> {
     let Some(state) = file::get_state(tx, path)? else {
-        file::new(tx, path, tree_gen.unwrap_or(0), &now)?;
+        file::new(tx, path, tree_gen.unwrap_or(0), &next)?;
         return Ok(());
     };
     let tree_gen = tree_gen.unwrap_or(state.tree_gen);
-    match state.state {
+    let new = match state.state {
         // We can't leave NEW until we have a hash and egroup. But we should
         // still update the tree_gen to show that the file is still around.
-        State::New(_) | State::Dirty(_) | State::Busy(_) => {
-            file::set_state(tx, path, tree_gen, &state.state)?;
-        }
+        State::New(_) | State::Dirty(_) | State::Busy(_) => state.state,
         // We might have enough information to know if the file is dirty again.
         State::Clean(clean) => {
             if clean.mtime != mtime || clean.fsize != fsize {
-                file::set_state(
-                    tx,
-                    path,
-                    tree_gen,
-                    &State::Dirty(Dirty {
-                        next: now,
-                        fsize,
-                        mtime,
-                        hash: clean.hash,
-                        egroup: clean.egroup,
-                    }),
-                )?;
+                State::Dirty(Dirty {
+                    next,
+                    fsize,
+                    mtime,
+                    hash: clean.hash,
+                    egroup: clean.egroup,
+                })
+            } else {
+                // Even if it's clean, we want to keep the gen up-to-date.
+                State::Clean(clean)
             }
         }
         // The file may have been readable in the past. For simplicity, treat it as
         // if it was new so we can pick the correct egroup and force a backup.
-        State::Unreadable(_) => {
-            file::set_state(tx, path, tree_gen, &State::New(New { next: now }))?;
-        }
+        State::Unreadable(_) => State::New(New { next }),
     };
+    file::set_state(tx, path, tree_gen, &new)?;
     Ok(())
 }
 
