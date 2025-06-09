@@ -4,7 +4,8 @@ use anyhow::bail;
 use crypto::model::EncryptionGroup;
 use ring::digest;
 use std::{
-    collections::{HashMap, VecDeque},
+    cmp::max,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -34,7 +35,9 @@ fn add_and_remove_roots() -> anyhow::Result<()> {
 }
 
 #[test]
-fn tree_scan() -> anyhow::Result<()> {
+fn tree_scan_sequence() -> anyhow::Result<()> {
+    // Let's validate that scans are scheduled as intended, and progress
+    // correctly.
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
     let a = Path::new("a");
     let b = Path::new("b");
@@ -43,22 +46,21 @@ fn tree_scan() -> anyhow::Result<()> {
     let Next::Done(next) = cnx.tree_scan_next()? else {
         bail!("unexpected");
     };
-    assert_eq!(next, SystemTime::UNIX_EPOCH); // Not initiated yet.
+    assert_eq!(next, t(0)); // Not initialized yet: let's scan right away.
 
-    let next_time = SystemTime::UNIX_EPOCH + Duration::from_secs(86400);
+    let next_time = t(86400); // Start a scan, and schedule the next one in a day.
     cnx.tree_scan_start(next_time)?;
 
     let (dir, mut updater) = cnx.tree_scan_next()?.next()?;
     assert_eq!(dir, a);
 
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(3210);
-
+    let hash_time = t(3210);
     let f1: OsString = "f1".into();
     let f1_modtime = t(1000);
-    updater.update(&ScanUpdate::File(f1, now, 100, f1_modtime))?;
+    updater.update(&ScanUpdate::File(f1, hash_time, 100, f1_modtime))?;
     updater.commit(true)?;
 
-    // Now we progress.
+    // Move on to the next directory.
     let (dir, mut updater) = cnx.tree_scan_next()?.next()?;
     assert_eq!(dir, b);
 
@@ -92,7 +94,9 @@ fn tree_scan() -> anyhow::Result<()> {
             a.join("f1"),
             File {
                 tree_gen: 1,
-                state: State::New(New { next: now.into() })
+                state: State::New(New {
+                    next: hash_time.into()
+                })
             }
         )]
     );
@@ -101,40 +105,34 @@ fn tree_scan() -> anyhow::Result<()> {
 
 #[test]
 fn tree_rescan() -> anyhow::Result<()> {
+    // Validate how files' next and gen evolve during successive scans.
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
 
-    let next_time = SystemTime::UNIX_EPOCH + Duration::new(86400, 0);
-    cnx.tree_scan_start(next_time)?;
+    let f1 = a.join("f1");
+    let f2 = a.join("f2");
+    let d1 = a.join("d1");
+    let d2 = a.join("d2");
 
-    let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+    let t1 = secs(1000);
+    db_setup(
+        cnx.conn(),
+        vec![HashMap::from([
+            (f1, State::New(New { next: t1 })),
+            (f2, State::New(New { next: t1 })),
+        ])],
+        vec![HashSet::from([d1, d2])],
+    )?;
 
+    cnx.tree_scan_start(t(86400))?;
+
+    let t2 = t(2000);
+
+    // f2 disappeared, f3 appeared.
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    let f1_mod_1 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-    let f2_mod_1 = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
-    updater.update(&ScanUpdate::File("f1".into(), t1, 1, f1_mod_1))?;
-    updater.update(&ScanUpdate::File("f2".into(), t1, 2, f2_mod_1))?;
-    updater.update(&ScanUpdate::Directory("d1".into()))?;
-    updater.update(&ScanUpdate::Directory("d2".into()))?;
-    updater.commit(true)?;
-
-    let (_, updater) = cnx.tree_scan_next()?.next()?;
-    updater.commit(true)?;
-
-    let (_, updater) = cnx.tree_scan_next()?.next()?;
-    updater.commit(true)?;
-
-    let next_time = SystemTime::UNIX_EPOCH + Duration::new(86400, 0);
-    cnx.tree_scan_start(next_time)?;
-
-    let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(2000);
-
-    let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    let f1_mod_2 = SystemTime::UNIX_EPOCH + Duration::from_secs(300);
-    let f3_mod_1 = SystemTime::UNIX_EPOCH + Duration::from_secs(400);
-    updater.update(&ScanUpdate::File("f1".into(), t2, 3, f1_mod_2))?;
-    updater.update(&ScanUpdate::File("f3".into(), t2, 4, f3_mod_1))?;
+    updater.update(&ScanUpdate::File("f1".into(), t2, 3, t(300)))?;
+    updater.update(&ScanUpdate::File("f3".into(), t2, 4, t(400)))?;
     updater.update(&ScanUpdate::Directory("d1".into()))?;
     updater.update(&ScanUpdate::Directory("d3".into()))?;
     updater.commit(true)?;
@@ -169,14 +167,14 @@ fn tree_rescan() -> anyhow::Result<()> {
                 // hashing of this file.
                 File {
                     tree_gen: 2,
-                    state: State::New(New { next: t1.into() }),
+                    state: State::New(New { next: t1 }),
                 }
             ),
             (
                 a.join("f2"),
                 File {
                     tree_gen: 1,
-                    state: State::New(New { next: t1.into() }),
+                    state: State::New(New { next: t1 }),
                 }
             ),
             (
@@ -198,15 +196,10 @@ fn tree_update_drop_is_noop() -> anyhow::Result<()> {
     let p1 = Path::new("/a");
     cnx.set_roots(&[p1])?;
 
-    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    cnx.tree_scan_start(t(0))?;
     {
         let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-        updater.update(&ScanUpdate::File(
-            "b".into(),
-            SystemTime::UNIX_EPOCH.into(),
-            1,
-            SystemTime::UNIX_EPOCH,
-        ))?;
+        updater.update(&ScanUpdate::File("b".into(), t(100), 1, t(200)))?;
     }
     // Despite the update(File()) above, the lack of commit means the db was not
     // altered.
@@ -221,7 +214,7 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
     let p1 = Path::new("/a/b");
     cnx.set_roots(&[p1])?;
 
-    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    cnx.tree_scan_start(t(0))?;
     let (_, updater) = cnx.tree_scan_next()?.next()?;
     // Make it unreachable
     updater.error(std::io::Error::new(
@@ -241,7 +234,7 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
     );
 
     // ...and fix reachability at the next round.
-    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    cnx.tree_scan_start(t(0))?;
     let (_, updater) = cnx.tree_scan_next()?.next()?;
     updater.commit(true)?;
 
@@ -267,13 +260,12 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
 
     let b: OsString = "b".into();
 
-    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    cnx.tree_scan_start(t(0))?;
 
     // Make a/b a file first.
-    let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    let t1 = t(100);
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    let b_mod = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
-    updater.update(&ScanUpdate::File(b.clone(), t1, 1, b_mod))?;
+    updater.update(&ScanUpdate::File(b.clone(), t1, 1, t(1)))?;
     updater.commit(true)?;
 
     cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
@@ -299,11 +291,11 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
         )]
     );
 
-    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    cnx.tree_scan_start(t(0))?;
 
-    let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    let t2 = t(200);
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File(b.clone(), t2, 1, b_mod))?;
+    updater.update(&ScanUpdate::File(b.clone(), t2, 1, t(1)))?;
     updater.commit(true)?;
 
     // The file is back on the scan.
@@ -332,68 +324,62 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
 
 #[test]
 fn hash_next() -> anyhow::Result<()> {
-    let egroup = fileid(1);
+    let egroup = egroup(1);
     let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
 
     let delta = Duration::from_secs(10);
-    let now = SystemTime::UNIX_EPOCH + delta;
+    let hash_time = t(0) + delta;
 
     // Initially, no file is known so no hash is requested.
-    let Next::Done(next) = cnx.hash_next(now)? else {
+    let Next::Done(next) = cnx.hash_next(hash_time)? else {
         panic!("unexpected")
     };
-    assert_eq!(next, now + FILE_NEXT_DELAY); // Arbitrary delay until we get files.
+    assert_eq!(next, hash_time + FILE_NEXT_DELAY); // Arbitrary delay until we get files.
 
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
 
-    let next_time = SystemTime::UNIX_EPOCH + Duration::new(86400, 0);
-    cnx.tree_scan_start(next_time)?;
-
+    cnx.tree_scan_start(t(86400))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File(
-        "f1".into(),
-        now.into(),
-        1,
-        SystemTime::UNIX_EPOCH,
-    ))?;
+    updater.update(&ScanUpdate::File("f1".into(), hash_time.into(), 1, t(10)))?;
     updater.commit(true)?;
 
     // From now on, file a/f1 is in the database, but with no hash yet.
     //
     // First try to get the hash a bit too soon:
-    let Next::Done(next) = cnx.hash_next(SystemTime::UNIX_EPOCH)? else {
+    let Next::Done(next) = cnx.hash_next(t(0))? else {
         panic!("unexpected")
     };
-    assert_eq!(next, now);
+    assert_eq!(next, hash_time);
 
     let f1 = a.join("f1");
-    let (file, _) = cnx.hash_next(now)?.next()?;
+    let (file, _) = cnx.hash_next(hash_time)?.next()?;
     assert_eq!(&file, &f1);
 
-    let (file, _) = cnx.hash_next(now)?.next()?;
+    // THe file must be hashed before progress is made.
+    let (file, _) = cnx.hash_next(hash_time)?.next()?;
     assert_eq!(&file, &f1);
 
     let fsize = 100;
-    let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+    let mtime = t(3600);
     let hash = digest::digest(&digest::SHA256, b"boo");
     cnx.hash_update(
         file,
-        /*next=*/ now + delta * 2,
-        /*soon=*/ now + delta,
+        /*next=*/ hash_time + delta * 2,
+        /*soon=*/ hash_time + delta,
         HashUpdate::Hash(Snapshot {
             fsize,
-            mtime: mtime.clone(),
+            mtime,
             hash: hash.clone(),
         }),
     )?;
 
     // The file is now dirty, and doesn't need to be hashed. We revert back
     // to arbitrary delay for the next attempt.
-    let Next::Done(next) = cnx.hash_next(now)? else {
+    let Next::Done(next) = cnx.hash_next(hash_time)? else {
         panic!("unexpected")
     };
-    assert_eq!(next, now + FILE_NEXT_DELAY);
+    assert_eq!(next, hash_time + FILE_NEXT_DELAY);
 
     // Confirm that the file is now dirty as intended.
     let got = fh::dump(cnx.conn())?;
@@ -405,7 +391,7 @@ fn hash_next() -> anyhow::Result<()> {
                 tree_gen: 1,
                 state: State::Dirty(Dirty {
                     // The file is made ready for backup "soon".
-                    next: (now + delta).into(),
+                    next: (hash_time + delta).into(),
                     fsize,
                     mtime: mtime.into(),
                     hash: hash.as_ref().to_owned(),
@@ -420,50 +406,40 @@ fn hash_next() -> anyhow::Result<()> {
 
 #[test]
 fn small_files_dont_share_egroups() -> anyhow::Result<()> {
-    let now = SystemTime::UNIX_EPOCH;
+    let hash_time = t(100);
 
-    let eg1 = fileid(1);
-    let eg2 = fileid(2);
+    let eg1 = egroup(1);
+    let eg2 = egroup(2);
     let mut cnx =
         Connection::new_in_memory(Arc::new(FakeRandom::new(vec![eg1.clone(), eg2.clone()])))?;
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
-    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    cnx.tree_scan_start(t(0))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File(
-        "f1".into(),
-        now,
-        1,
-        SystemTime::UNIX_EPOCH,
-    ))?;
-    updater.update(&ScanUpdate::File(
-        "f2".into(),
-        now,
-        1,
-        SystemTime::UNIX_EPOCH,
-    ))?;
+    updater.update(&ScanUpdate::File("f1".into(), hash_time, 1, t(0)))?;
+    updater.update(&ScanUpdate::File("f2".into(), hash_time, 1, t(0)))?;
     updater.commit(true)?;
 
     let fsize = 100;
-    let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+    let mtime = t(3600);
     let hash = digest::digest(&digest::SHA256, b"boo");
     cnx.hash_update(
         a.join("f1"),
-        SystemTime::UNIX_EPOCH,
-        SystemTime::UNIX_EPOCH,
+        /*next=*/ t(200),
+        /*soon=*/ t(110),
         HashUpdate::Hash(Snapshot {
             fsize,
-            mtime: mtime.clone(),
+            mtime,
             hash: hash.clone(),
         }),
     )?;
     cnx.hash_update(
         a.join("f2"),
-        SystemTime::UNIX_EPOCH,
-        SystemTime::UNIX_EPOCH,
+        /*next=*/ t(200),
+        /*soon=*/ t(110),
         HashUpdate::Hash(Snapshot {
             fsize,
-            mtime: mtime.clone(),
+            mtime,
             hash: hash.clone(),
         }),
     )?;
@@ -477,7 +453,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: now.into(),
+                        next: secs(110), // The "soon" time of the update.
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -490,7 +466,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: now.into(),
+                        next: secs(110), // The "soon" time of the update.
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -505,48 +481,36 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
 
 #[test]
 fn large_identical_files_share_egroups() -> anyhow::Result<()> {
-    let now = SystemTime::UNIX_EPOCH;
-
-    let egroup = fileid(1);
+    let egroup = egroup(1);
     let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
-    cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
+    cnx.tree_scan_start(t(0))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File(
-        "f1".into(),
-        now.into(),
-        1,
-        SystemTime::UNIX_EPOCH,
-    ))?;
-    updater.update(&ScanUpdate::File(
-        "f2".into(),
-        now.into(),
-        1,
-        SystemTime::UNIX_EPOCH,
-    ))?;
+    updater.update(&ScanUpdate::File("f1".into(), t(0), 1, t(0)))?;
+    updater.update(&ScanUpdate::File("f2".into(), t(0), 1, t(0)))?;
     updater.commit(true)?;
 
     let fsize = 2 * SMALLEST_INDEPENDENT_FILE;
-    let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+    let mtime = t(3600);
     let hash = digest::digest(&digest::SHA256, b"boo");
     cnx.hash_update(
         a.join("f1"),
-        SystemTime::UNIX_EPOCH,
-        SystemTime::UNIX_EPOCH,
+        /*next=*/ t(200),
+        /*soon=*/ t(110),
         HashUpdate::Hash(Snapshot {
             fsize,
-            mtime: mtime.clone(),
+            mtime,
             hash: hash.clone(),
         }),
     )?;
     cnx.hash_update(
         a.join("f2"),
-        SystemTime::UNIX_EPOCH,
-        SystemTime::UNIX_EPOCH,
+        /*next=*/ t(200),
+        /*soon=*/ t(110),
         HashUpdate::Hash(Snapshot {
             fsize,
-            mtime: mtime.clone(),
+            mtime,
             hash: hash.clone(),
         }),
     )?;
@@ -560,7 +524,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: now.into(),
+                        next: secs(110),
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -573,7 +537,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: now.into(),
+                        next: secs(110),
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -591,10 +555,10 @@ fn metadata_update_adds_file() -> anyhow::Result<()> {
     let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![])))?;
     let a = Path::new("a");
 
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(321);
+    let next = t(321);
     // We can drop random metadata for a file, and it'll be added as New right
     // away.
-    cnx.metadata_update(a.to_owned(), now, 100, SystemTime::UNIX_EPOCH)?;
+    cnx.metadata_update(a.to_owned(), next, 100, t(11))?;
 
     let got = fh::dump(cnx.conn())?;
     assert_eq!(
@@ -602,8 +566,8 @@ fn metadata_update_adds_file() -> anyhow::Result<()> {
         vec![(
             a.to_owned(),
             File {
-                tree_gen: 0,
-                state: State::New(New { next: now.into() })
+                tree_gen: 0, // Not scanned yet.
+                state: State::New(New { next: next.into() })
             }
         )]
     );
@@ -626,6 +590,7 @@ fn metadata_always_advance_tree_gen() -> anyhow::Result<()> {
             file.clone(),
             State::New(New { next: hash_next }),
         )])],
+        vec![],
     )?;
 
     let scan_next = t(100);
@@ -653,7 +618,7 @@ fn metadata_always_advance_tree_gen() -> anyhow::Result<()> {
 fn full_cycle() -> anyhow::Result<()> {
     // Take a file through all its positive states (not including unreadable).
 
-    let egroup = fileid(1);
+    let egroup = egroup(1);
     let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
 
     let root = Path::new("root");
@@ -702,7 +667,7 @@ fn full_cycle() -> anyhow::Result<()> {
 
 #[test]
 fn hash_update_progession() -> anyhow::Result<()> {
-    let egroup = fileid(1);
+    let egroup = egroup(1);
     let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
 
     let root = Path::new("root");
@@ -781,22 +746,37 @@ fn secs(secs: u64) -> TimeInSeconds {
     t(secs).into()
 }
 
+/// Sets up the database with provided files and directories.
 fn db_setup(
     conn: &mut rusqlite::Connection,
-    contents: Vec<HashMap<PathBuf, State>>,
+    files: Vec<HashMap<PathBuf, State>>,
+    dirs: Vec<HashSet<PathBuf>>,
 ) -> anyhow::Result<i64> {
     let txn = conn.transaction()?;
     let mut tree_gen = settings::get_int(&txn, "tree-gen")?.unwrap_or(0);
-    for values in contents {
+    let largest = max(files.len(), dirs.len());
+    for idx in 0..largest {
         tree_gen += 1;
-        for (path, state) in values {
-            let path: LocalPath = path.into();
-            // set_state() won't insert by design. So we must ensure the file
-            // exists first.
-            if file::get_state(&txn, &path)?.is_none() {
-                file::new(&txn, &path, tree_gen, &secs(0))?
+        if idx < files.len() {
+            for (path, state) in &files[idx] {
+                let path: LocalPath = path.clone().into();
+                // set_state() won't insert by design. So we must ensure the file
+                // exists first.
+                if file::get_state(&txn, &path)?.is_none() {
+                    file::new(&txn, &path, tree_gen, &secs(0))?
+                }
+                file::set_state(&txn, &path, tree_gen, &state)?;
             }
-            file::set_state(&txn, &path, tree_gen, &state)?;
+        }
+        if idx < dirs.len() {
+            for path in &dirs[idx] {
+                let path: LocalPath = path.clone().into();
+                let count = directory::set_path_aim(&txn, tree_gen, &path)?;
+                if count == 0 {
+                    directory::insert(&txn, &path, tree_gen)?;
+                }
+                directory::update_dir_complete(&txn, &path, tree_gen, true)?;
+            }
         }
     }
     settings::set(&txn, "tree-gen", &Setting::N(tree_gen))?;
@@ -804,7 +784,7 @@ fn db_setup(
     Ok(tree_gen)
 }
 
-fn fileid(b: u8) -> EncryptionGroup {
+fn egroup(b: u8) -> EncryptionGroup {
     let bytes: [u8; crypto::model::ENCRYPTION_GROUP_LEN] = [b, 0, 0, 0, 0, 0];
     crypto::model::EncryptionGroup::try_from(bytes.as_ref()).unwrap()
 }
