@@ -54,16 +54,20 @@ pub enum State {
 // New file. Transitions to Dirty or Unreadable after hashing.
 #[derive(Debug, PartialEq)]
 pub struct New {
+    // When the file should be hashed.
     pub next: TimeInSeconds,
 }
 
 // Dirty file. Transitions to Busy when being backed up.
 #[derive(Debug, PartialEq)]
 pub struct Dirty {
+    // When the file should be backed up.
     pub next: TimeInSeconds,
+    // Current snapshot of the file.
     pub fsize: FileSize,
     pub mtime: TimeInMicroseconds,
     pub hash: Vec<u8>,
+    // How should the file be encrypted.
     pub egroup: StoredEncryptionGroup,
 }
 
@@ -76,16 +80,20 @@ pub struct Busy {
 // scanning.
 #[derive(Debug, PartialEq)]
 pub struct Clean {
+    // When the file should be hashed.
     pub next: TimeInSeconds,
+    // Current snapshot of the file.
     pub fsize: FileSize,
     pub mtime: TimeInMicroseconds,
     pub hash: Vec<u8>,
+    // How should the file be encrypted.
     pub egroup: StoredEncryptionGroup,
 }
 
 // Unreadable file. Transitions to New after hashing.
 #[derive(Debug, PartialEq)]
 pub struct Unreadable {
+    // When the file should be hashed / attempted to be read.
     pub next: TimeInSeconds,
     pub access_error: String,
 }
