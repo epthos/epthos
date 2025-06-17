@@ -1,34 +1,55 @@
-Instead of having an immutable ID to represent a file, we could use the id
-as the HKDF parameter. Then we can more easily have multiple files
-share the salt when we realize they are actually related, and would benefit
-from block sharing. This still makes attacks hard as the salt can only be
-influenced by having direct access to the existing files. We can also stop
-caring about collisions, as long as we generate randomly for the other files.
+# File states
 
-Generate the id/salt only after the first hash? This would help distinguish
-new files from already seen files, and ensure we back up only after we know
-we won't duplicate blocks unnecessarily.
+- New: files freshly discovered, not yet assigned an encryption group.
+- Dirty: files that need a backup attempt.
+- Busy: files actively being backed up.
+- Clean: files that have been backed up and haven't changed since.
+- Unreadable: files that can't be read.
 
-Instead of forwarding the watcher's content directly as filepicker.next(),
-why not store the new file size and change time directly into filestore ?
-Introduce a dirty bit, so that the file is flagged for backup.
+```mermaid
+stateDiagram-v2
+  [*] --> New: tree scan or metadata update
+  New --> Dirty: hash update
+  New --> Unreadable: hash update
+  Unreadable --> New: hash update
+  Dirty --> Busy: starting backup
+  Dirty --> Unreadable: hash update
+  Busy --> Clean: backup complete
+  Busy --> Unreadable: backup failed
+  Clean --> Dirty: metadata or hash update
+  Clean --> Unreadable: hash update
+```
 
-File states:
+# Scanning
 
-- NEW: no assigned id yet, only size & mtime. Triggers hashing & matching.
-- DIRTY: caused by a change in size, mtime or hash. Triggers backup.
-- BUSY: actively being backed up. Should we hardlink to snapshot?
-- CLEAN: caused by backup completion. Provides updated size, mtime, hash as
-         of the backup. 
+File scanning uses two modes to keep up with changes:
 
-<O> -- Scan::update(mtime, fsize) --> NEW
-    -- mark_dirty(mtime, fsize)   --> NEW
+- time based: periodic search for changes across all files.
+- watcher based: immediate reaction on filesystem changes reported by the OS.
 
-NEW   -- hash_next(hash) --> DIRTY, add encryption_group.
-DIRTY -- backup_start    --> BUSY, snapshot.
-BUSY  -- complete(mtime, fsize, hash) --> CLEAN
-CLEAN -- hash_next(hash), scan::update() --> DIRTY if changed.
-UNAVAILABLE -- file can't be read
+## Time-based
+
+Starting from "roots" which are provided by the user, the file manager checks
+all reachable files (not following symlinks) on a regular basis.
+
+Once a file is detected, it carries its own time-to-next-action, which will
+ensure changes always get enventually detected.
+
+## Watcher-based
+
+When the OS detects file changes under the roots, the scanner will do a fast
+check about the file's metadata (size, modification time) to decide if a
+state change is warranted.
+
+# Delays
+
+While we generally want to react quickly, there are still things we want to
+postpone:
+
+- running a backup while a file is actively modified: similar to "debouncing"
+  we want to wait for the file to be stable.
+- for files frequently modified, we also want to limit the number of backups
+  independently of debouncing.
 
 
 TODO: Handling of dropped roots: Crashplan deletes data right away.
