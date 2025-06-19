@@ -2,6 +2,7 @@
 //! detects changes that need to be backed up.
 
 use crate::{
+    clock::{self, Clock},
     disk::{self, Disk},
     filestore::{self, Connection, Filestore, HashUpdate, Next, ScanUpdate, Scanner},
     watcher,
@@ -37,21 +38,24 @@ pub fn new(
 ) -> anyhow::Result<FileManager> {
     let store = Connection::new(db, rand)?;
     let disk = disk::new()?;
+    let clock = clock::new();
 
     Ok(FileManager::new(
         store_local,
         store,
         disk,
+        clock,
         watcher::new()?,
         scan_period,
     ))
 }
 
 impl FileManager {
-    fn new<S: Filestore + 'static, D: Disk + 'static>(
+    fn new<S: Filestore + 'static, D: Disk + 'static, C: Clock + 'static>(
         store_local: &LocalSet,
         store: S,
         disk: D,
+        clock: C,
         watcher: Box<dyn watcher::Watcher + Send>,
         scan_period: Duration,
     ) -> FileManager {
@@ -59,6 +63,7 @@ impl FileManager {
         let mut runner = Runner {
             store,
             disk,
+            clock,
             watcher,
             scan_period,
         };
@@ -101,13 +106,15 @@ enum Operation {
     SetRoots(Vec<PathBuf>, Sender<anyhow::Result<()>>),
 }
 
-struct Runner<S, D>
+struct Runner<S, D, C>
 where
     S: Filestore,
     D: Disk,
+    C: Clock,
 {
     store: S,
     disk: D,
+    clock: C,
     watcher: Box<dyn watcher::Watcher + Send>,
     scan_period: Duration,
 }
@@ -124,12 +131,12 @@ fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
     }
 }
 
-const HASH_DELAY: Duration = Duration::from_secs(3600);
+const HASH_DELAY: Duration = Duration::from_secs(86400 * 7); // weekly
 const BACKUP_DELAY: Duration = Duration::from_secs(300);
 
 // The agent side of the manager. Holds the mutable store and watcher, and
 // performs the dispatching logic.
-impl<S: Filestore, D: Disk> Runner<S, D> {
+impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
     async fn run(&mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
         tracing::info!("FileManager starting");
 
@@ -141,7 +148,7 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
         // active, hash files that haven't changed in a while, and otherwise respond
         // to client requests.
         loop {
-            let now = SystemTime::now();
+            let now = self.clock.now();
             // hash_delay is assessed at every round as many operations can request a file be hashed,
             // independently of timing.
             let mut hash_delay: Option<SystemTime> = None;
@@ -179,6 +186,7 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                     }
                     filestore::Next::Next(dir, mut updater) => {
                         tracing::debug!("scanning {:?}", &dir);
+                        // TODO: move to disk module.
                         match fs::read_dir(&dir) {
                             Ok(subdirs) => {
                                 let mut complete = true;
@@ -205,24 +213,23 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
             let more_pending = [&scan_delay, &hash_delay, &backup_delay]
                 .iter()
                 .any(|d| d.is_none());
-            let mut poll = tokio::time::interval(Duration::from_millis(1));
             tracing::debug!("waiting for next action");
             tokio::select! {
-                _ = poll.tick(), if more_pending => {
-                    // The artificial delay still allows for pending events (client, watcher)
+                _ = self.clock.sleep(Duration::from_millis(1)), if more_pending => {
+                    // The artificial delay allows for pending events (client, watcher)
                     // to take place.
                 }
-                _ = tokio::time::sleep(scan_sleep), if scan_delay.is_some() => {
+                _ = self.clock.sleep(scan_sleep), if scan_delay.is_some() => {
                     tracing::info!("ready to start a new tree scan");
                     scan_delay = None;
                     if let Err(err) = self.store.tree_scan_start(now + self.scan_period) {
                         tracing::error!("tree_scan_start() failed: {:?}", err);
                     }
                 }
-                _ = tokio::time::sleep(hash_sleep), if hash_delay.is_some() => {
+                _ = self.clock.sleep(hash_sleep), if hash_delay.is_some() => {
                     tracing::debug!("ready to hash a new file");
                 }
-                _ = tokio::time::sleep(back_sleep), if backup_delay.is_some() => {
+                _ = self.clock.sleep(back_sleep), if backup_delay.is_some() => {
                     tracing::debug!("ready to backup a new file");
                 }
                 op = rx.recv() => {
@@ -247,7 +254,7 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
                         Some(watcher::Update::File(path)) => {
                             tracing::debug!("Received watcher: {:?}", &path);
                             if let Ok((fsize, mtime)) = self.disk.metadata(&path) {
-                                self.store.metadata_update(path, now, fsize, mtime)?;
+                                self.store.metadata_update(path, now + BACKUP_DELAY, fsize, mtime)?;
                             }
                         },
                     }
@@ -265,7 +272,7 @@ impl<S: Filestore, D: Disk> Runner<S, D> {
         // this needs to be conditional.
         if changed {
             self.store
-                .tree_scan_start(SystemTime::now() + self.scan_period)?;
+                .tree_scan_start(self.clock.now() + self.scan_period)?;
         }
         Ok(())
     }

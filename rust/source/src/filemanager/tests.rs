@@ -70,6 +70,20 @@ async fn set_roots() -> anyhow::Result<()> {
 
 // ---------------------- helpers -----------------------
 
+struct FakeClock {
+    now: Arc<Mutex<SystemTime>>,
+}
+
+impl Clock for FakeClock {
+    fn now(&self) -> SystemTime {
+        self.now.lock().unwrap().clone()
+    }
+
+    fn sleep(&self, delay: Duration) -> impl Future<Output = ()> + '_ {
+        tokio::time::sleep(delay)
+    }
+}
+
 /// Creates a test manager with fake watcher and store states that can be
 /// controlled by the test.
 fn test_manager(
@@ -85,6 +99,7 @@ fn test_manager(
         store_local,
         FakeStore::new(store_state.clone()),
         FakeDisk::new(),
+        clock::new(),
         Box::new(FakeWatcher::new(watcher_state.clone(), rx)),
         std::time::Duration::from_secs(10),
     );

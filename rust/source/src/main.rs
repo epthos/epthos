@@ -2,6 +2,7 @@ use ::settings::process;
 use anyhow::{Context, Result};
 use std::{path::Path, sync::Arc};
 
+mod clock;
 mod disk;
 mod filemanager;
 mod filestore;
