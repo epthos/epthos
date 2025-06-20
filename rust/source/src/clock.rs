@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 pub trait Clock {
     fn now(&self) -> SystemTime;
-    fn sleep(&self, delay: Duration) -> impl Future<Output = ()> + '_;
+    fn sleep(&self, delay: Duration, id: &str) -> impl Future<Output = ()> + '_;
 }
 
 pub fn new() -> SystemClock {
@@ -18,7 +18,7 @@ impl Clock for SystemClock {
         SystemTime::now()
     }
 
-    fn sleep(&self, delay: Duration) -> impl Future<Output = ()> + '_ {
+    fn sleep(&self, delay: Duration, _: &str) -> impl Future<Output = ()> + '_ {
         tokio::time::sleep(delay)
     }
 }

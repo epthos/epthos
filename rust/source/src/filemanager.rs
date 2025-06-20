@@ -215,21 +215,21 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                 .any(|d| d.is_none());
             tracing::debug!("waiting for next action");
             tokio::select! {
-                _ = self.clock.sleep(Duration::from_millis(1)), if more_pending => {
+                _ = self.clock.sleep(Duration::from_millis(1), "tick"), if more_pending => {
                     // The artificial delay allows for pending events (client, watcher)
                     // to take place.
                 }
-                _ = self.clock.sleep(scan_sleep), if scan_delay.is_some() => {
+                _ = self.clock.sleep(scan_sleep, "tree_scan"), if scan_delay.is_some() => {
                     tracing::info!("ready to start a new tree scan");
                     scan_delay = None;
                     if let Err(err) = self.store.tree_scan_start(now + self.scan_period) {
                         tracing::error!("tree_scan_start() failed: {:?}", err);
                     }
                 }
-                _ = self.clock.sleep(hash_sleep), if hash_delay.is_some() => {
+                _ = self.clock.sleep(hash_sleep, "hash"), if hash_delay.is_some() => {
                     tracing::debug!("ready to hash a new file");
                 }
-                _ = self.clock.sleep(back_sleep), if backup_delay.is_some() => {
+                _ = self.clock.sleep(back_sleep, "backup"), if backup_delay.is_some() => {
                     tracing::debug!("ready to backup a new file");
                 }
                 op = rx.recv() => {
