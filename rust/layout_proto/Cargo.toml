@@ -8,7 +8,7 @@ publish = false
 doctest = false
 
 [dependencies]
-prost = "0"
+prost = "0.13"
 tonic = "0"
 
 [build-dependencies]
