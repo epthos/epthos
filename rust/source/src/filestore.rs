@@ -5,12 +5,13 @@
 use crate::model::{FileSize, ModificationTime};
 use anyhow::{Context, bail};
 use crypto::{SharedRandom, model::EncryptionGroup};
-use field::{LocalPath, StoredEncryptionGroup, TimeInMicroseconds, TimeInSeconds};
+use field::{LocalPath, StoredEncryptionGroup, TimeInMicroseconds};
 use file::{Busy, Clean, Dirty, New, State, Unreadable};
 use rusqlite::Transaction;
 use rusqlite_migration::Migrations;
 use settings::Setting;
 use std::{
+    cmp::{max, min},
     ffi::OsString,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -26,6 +27,39 @@ mod settings;
 mod tests;
 
 // ----------------- API DEFINITION ------------------------
+
+#[derive(Debug, Clone)]
+pub struct Timing {
+    // How often we want to scan the filesystem roots. This is reasonably
+    // cheap and catches changes that happened when the service was down or
+    // if the file watcher misses them.
+    scan_period: Duration,
+    // How often are files hashed for unexpected changes. This covers changes
+    // that don't impact a file's metadata (mtime, size). It's more expensive.
+    hash_period: Duration,
+    // How frequently can a given file be backed up if it changes frequently.
+    min_backup_period: Duration,
+    // How long to wait for a file that is actively being modified, so that
+    // it's not backed up mid-work. This is a range, as we want to wait a
+    // minimum amount of time, but if the file does not seems to stabilize we
+    // might still need to take a stab at it. This applies after min_backup_period
+    // has passed.
+    cool_off_period: (Duration, Duration),
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Timing {
+            scan_period: Duration::from_secs(86400),     // Daily
+            hash_period: Duration::from_secs(86400 * 7), // Weekly
+            // No more than one backup per hour for active files.
+            min_backup_period: Duration::from_secs(3600),
+            // Watch a modified file for at least 5 minutes and at most 30 to wait for
+            // it to stabilize before backing it up.
+            cool_off_period: (Duration::from_secs(300), Duration::from_secs(1800)),
+        }
+    }
+}
 
 /// Filestore defines how and when filesystem information is updated and retrieved.
 pub trait Filestore {
@@ -47,8 +81,7 @@ pub trait Filestore {
     fn hash_update(
         &mut self,
         file: PathBuf,
-        next: SystemTime,
-        soon: SystemTime,
+        now: SystemTime,
         update: HashUpdate,
     ) -> anyhow::Result<()>;
 
@@ -69,10 +102,11 @@ pub trait Filestore {
     /// Record a file's backup as having completed, with the provided |update| as the
     /// state as of the backup. |next| indicates the next time it should be hashed
     /// again.
+    #[allow(dead_code)] // TODO: use it!
     fn backup_done(
         &mut self,
         path: PathBuf,
-        next: SystemTime,
+        now: SystemTime,
         update: HashUpdate,
     ) -> anyhow::Result<()>;
     /// Return all the pending backups. Typically used to ensure the backup engine
@@ -143,6 +177,7 @@ impl<Extra> Next<Extra> {
 pub struct Connection {
     conn: rusqlite::Connection,
     rand: crypto::SharedRandom,
+    timing: Timing,
 }
 
 /// Default implementation of the Updater.
@@ -150,6 +185,7 @@ pub struct UpdaterImpl<'a> {
     tx: rusqlite::Transaction<'a>,
     dir: LocalPath,
     aim: i64,
+    timing: Timing,
 }
 
 impl std::fmt::Debug for UpdaterImpl<'_> {
@@ -168,9 +204,13 @@ const SETTING_NEXT_RUN: &str = "next-run";
 
 impl Connection {
     /// Open a connection to the specified database, creating it if missing.
-    pub fn new<P: AsRef<Path>>(path: P, rand: crypto::SharedRandom) -> anyhow::Result<Connection> {
+    pub fn new<P: AsRef<Path>>(
+        path: P,
+        rand: crypto::SharedRandom,
+        timing: Timing,
+    ) -> anyhow::Result<Connection> {
         let con = rusqlite::Connection::open(path.as_ref()).context("Failed to open db")?;
-        initialize(con, rand)
+        initialize(con, rand, timing)
     }
 
     fn migrations() -> Migrations<'static> {
@@ -179,9 +219,9 @@ impl Connection {
 
     /// In-memory database, for testing.
     #[cfg(test)]
-    pub fn new_in_memory(rand: crypto::SharedRandom) -> anyhow::Result<Connection> {
+    pub fn new_in_memory(rand: crypto::SharedRandom, timing: Timing) -> anyhow::Result<Connection> {
         let con = rusqlite::Connection::open_in_memory().context("Failed to open in-memory db")?;
-        initialize(con, rand)
+        initialize(con, rand, timing)
     }
 
     #[cfg(test)]
@@ -228,7 +268,8 @@ impl Filestore for Connection {
 
     /// Configure a new tree scan, and indicate the earliest time the next one should take
     /// place.
-    fn tree_scan_start(&mut self, next_scan: SystemTime) -> anyhow::Result<()> {
+    fn tree_scan_start(&mut self, now: SystemTime) -> anyhow::Result<()> {
+        let next_scan = now + self.timing.scan_period;
         let txn = self.conn.transaction()?;
         // Begin by aiming the new scan at the roots.
         let aim = settings::get_int(&txn, SETTING_TREE_GEN)?.unwrap_or(0) + 1;
@@ -264,6 +305,7 @@ impl Filestore for Connection {
                     tx: self.conn.transaction()?,
                     dir,
                     aim,
+                    timing: self.timing.clone(),
                 },
             ),
             None => Next::Done(next),
@@ -300,14 +342,11 @@ impl Filestore for Connection {
     fn hash_update(
         &mut self,
         file: PathBuf,
-        next: SystemTime,
-        soon: SystemTime,
+        now: SystemTime,
         update: HashUpdate,
     ) -> anyhow::Result<()> {
         let file_repr: LocalPath = file.into();
         let tx = self.conn.transaction()?;
-        let next: TimeInSeconds = next.into();
-        let soon: TimeInSeconds = soon.into();
         // Hash updates can only happen to files we already know about (rather than being
         // picked up by the file watcher), so failure to update the record is an internal
         // inconsistency.
@@ -325,7 +364,9 @@ impl Filestore for Connection {
                             &file_repr,
                             current.tree_gen,
                             &State::Dirty(Dirty {
-                                next: soon,
+                                next: (now + self.timing.cool_off_period.0).into(),
+                                // In such cases, there is no reason to delay the backup, as no previous one took place.
+                                threshold: (now + self.timing.cool_off_period.1).into(),
                                 fsize: snapshot.fsize,
                                 mtime: snapshot.mtime.into(),
                                 hash: snapshot.hash.as_ref().to_owned(),
@@ -336,8 +377,11 @@ impl Filestore for Connection {
                         )?;
                     }
                     // The additional information does not cause any change, we already
-                    // need to back the file up.
-                    State::Dirty(_) | State::Busy(_) => {}
+                    // need to back the file up. In principle we should not even request
+                    // hashing, so this is worth pointing out.
+                    State::Dirty(_) | State::Busy(_) => {
+                        tracing::warn!("unexpected hashing of {:?}", &current);
+                    }
                     // This is the only conditional case: if the information has not changed,
                     // the file is still CLEAN.
                     State::Clean(mut old) => {
@@ -346,15 +390,23 @@ impl Filestore for Connection {
                             || mtime != old.mtime
                             || snapshot.fsize != old.fsize
                         {
+                            // Clean.threshold represents the earlier we can back up the file.
+                            let earliest_backup = max(
+                                old.threshold.into_inner(),
+                                now + self.timing.cool_off_period.0,
+                            );
+                            let latest_backup = earliest_backup + self.timing.cool_off_period.1;
                             State::Dirty(Dirty {
-                                next: soon,
+                                next: earliest_backup.into(),
+                                threshold: latest_backup.into(),
                                 fsize: snapshot.fsize,
                                 mtime: snapshot.mtime.into(),
                                 hash: snapshot.hash.as_ref().to_owned(),
                                 egroup: old.egroup,
                             })
                         } else {
-                            old.next = next;
+                            // Get ready to hash the file again in the future.
+                            old.next = (now + self.timing.hash_period).into();
                             State::Clean(old)
                         };
                         file::set_state(&tx, &file_repr, current.tree_gen, &next_state)?;
@@ -362,12 +414,13 @@ impl Filestore for Connection {
                 };
             }
             HashUpdate::Unreadable(error) => {
+                let hash_next = now + self.timing.hash_period;
                 file::set_state(
                     &tx,
                     &file_repr,
                     current.tree_gen,
                     &State::Unreadable(Unreadable {
-                        next,
+                        next: hash_next.into(),
                         access_error: format!("{:?}", error),
                     }),
                 )?;
@@ -387,7 +440,15 @@ impl Filestore for Connection {
         let file_repr: LocalPath = path.into();
         let mtime: TimeInMicroseconds = mtime.into();
         let mut tx = self.conn.transaction()?;
-        metadata_update(&mut tx, &file_repr, next.into(), None, fsize, mtime)?;
+        metadata_update(
+            &mut tx,
+            &file_repr,
+            next.into(),
+            None,
+            fsize,
+            mtime,
+            &self.timing,
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -432,23 +493,28 @@ impl Filestore for Connection {
     fn backup_done(
         &mut self,
         path: PathBuf,
-        next: SystemTime,
+        now: SystemTime,
         update: HashUpdate,
     ) -> anyhow::Result<()> {
         let path: LocalPath = path.into();
         let txn = self.conn.transaction()?;
         let file = file::get_state(&txn, &path)?.context("missing file")?;
         if let State::Busy(busy) = file.state {
+            let hash_next = now + self.timing.hash_period;
             let new_state = match update {
-                HashUpdate::Hash(snapshot) => State::Clean(Clean {
-                    next: next.into(),
-                    fsize: snapshot.fsize,
-                    mtime: snapshot.mtime.into(),
-                    hash: snapshot.hash.as_ref().to_owned(),
-                    egroup: busy.egroup,
-                }),
+                HashUpdate::Hash(snapshot) => {
+                    let earliest_backup = now + self.timing.min_backup_period;
+                    State::Clean(Clean {
+                        next: hash_next.into(),
+                        threshold: earliest_backup.into(),
+                        fsize: snapshot.fsize,
+                        mtime: snapshot.mtime.into(),
+                        hash: snapshot.hash.as_ref().to_owned(),
+                        egroup: busy.egroup,
+                    })
+                }
                 HashUpdate::Unreadable(error) => State::Unreadable(Unreadable {
-                    next: next.into(),
+                    next: hash_next.into(),
                     access_error: format!("{:?}", error),
                 }),
             };
@@ -495,6 +561,7 @@ impl Scanner for UpdaterImpl<'_> {
                     Some(self.aim),
                     *fsize,
                     mtime,
+                    &self.timing,
                 )?;
             }
         };
@@ -536,25 +603,42 @@ fn pick_egroup(
 fn metadata_update(
     tx: &mut rusqlite::Transaction,
     path: &LocalPath,
-    next: TimeInSeconds,
+    now: SystemTime,
     tree_gen: Option<i64>,
     fsize: FileSize,
     mtime: TimeInMicroseconds,
+    timing: &Timing,
 ) -> anyhow::Result<()> {
     let Some(state) = file::get_state(tx, path)? else {
-        file::new(tx, path, tree_gen.unwrap_or(0), &next)?;
+        file::new(tx, path, tree_gen.unwrap_or(0), &now.into())?;
         return Ok(());
     };
     let tree_gen = tree_gen.unwrap_or(state.tree_gen);
     let new = match state.state {
         // We can't leave NEW until we have a hash and egroup. But we should
         // still update the tree_gen to show that the file is still around.
-        State::New(_) | State::Dirty(_) | State::Busy(_) => state.state,
+        State::New(_) | State::Busy(_) => state.state,
+        State::Dirty(mut current) => {
+            if current.mtime != mtime || current.fsize != fsize {
+                current.next = min(
+                    current.threshold.into_inner(),
+                    now + timing.cool_off_period.0,
+                )
+                .into();
+            }
+            State::Dirty(current)
+        }
         // We might have enough information to know if the file is dirty again.
         State::Clean(clean) => {
             if clean.mtime != mtime || clean.fsize != fsize {
+                // TODO: this is the same as hash_update in many ways.
+                let earliest_backup =
+                    max(clean.threshold.into_inner(), now + timing.cool_off_period.0);
+                let latest_backup = earliest_backup + timing.cool_off_period.1;
+
                 State::Dirty(Dirty {
-                    next,
+                    next: earliest_backup.into(),
+                    threshold: latest_backup.into(),
                     fsize,
                     mtime,
                     hash: clean.hash,
@@ -567,7 +651,7 @@ fn metadata_update(
         }
         // The file may have been readable in the past. For simplicity, treat it as
         // if it was new so we can pick the correct egroup and force a backup.
-        State::Unreadable(_) => State::New(New { next }),
+        State::Unreadable(_) => State::New(New { next: now.into() }),
     };
     file::set_state(tx, path, tree_gen, &new)?;
     Ok(())
@@ -576,6 +660,7 @@ fn metadata_update(
 fn initialize(
     mut con: rusqlite::Connection,
     rand: crypto::SharedRandom,
+    timing: Timing,
 ) -> anyhow::Result<Connection> {
     con.pragma_update(None, "foreign_keys", "ON")
         .context("Failed to enable foreign keys")?;
@@ -583,5 +668,9 @@ fn initialize(
     Connection::migrations()
         .to_latest(&mut con)
         .context("Failed to migrate database")?;
-    Ok(Connection { conn: con, rand })
+    Ok(Connection {
+        conn: con,
+        rand,
+        timing,
+    })
 }

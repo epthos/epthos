@@ -15,6 +15,12 @@ use std::{
 use test_log::test;
 use tokio::{sync::oneshot, task::LocalSet};
 
+// Have one file dirty, with next set at +5.
+// Send a metadata update within that time, with
+// an actual change.
+// Check that the next is set further out.
+// This should not be true if the update is a noop.
+
 #[test(tokio::test)]
 async fn wait_for_tree_scan() -> anyhow::Result<()> {
     let local = LocalSet::new();
@@ -112,6 +118,7 @@ impl FakeClockHandler {
         )
     }
 
+    #[allow(dead_code)] // TODO: use it!
     fn set_now(&self, now: SystemTime) {
         let mut inner = self.inner.lock().unwrap();
         inner.now = now;
@@ -242,7 +249,6 @@ fn test_manager(
         FakeDisk::new(),
         clock,
         Box::new(FakeWatcher::new(watcher_state.clone(), rx)),
-        std::time::Duration::from_secs(10),
     );
 
     (manager, store_state, clock_state, tx)
@@ -356,8 +362,7 @@ impl Filestore for FakeStore {
     fn hash_update(
         &mut self,
         _file: PathBuf,
-        _next: SystemTime,
-        _soon: SystemTime,
+        _now: SystemTime,
         _update: HashUpdate,
     ) -> anyhow::Result<()> {
         todo!()

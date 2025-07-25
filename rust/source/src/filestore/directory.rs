@@ -157,7 +157,7 @@ fn update_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filestore::Connection;
+    use crate::filestore::{Connection, Timing};
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -165,7 +165,8 @@ mod tests {
 
     #[test]
     fn add_and_remove_roots() -> anyhow::Result<()> {
-        let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+        let mut cnx =
+            Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
         let got = |cnx: &mut Connection| -> anyhow::Result<Vec<(PathBuf, bool)>> {
             Ok(pth::dump(cnx.conn())?
                 .into_iter()
@@ -201,7 +202,8 @@ mod tests {
 
     #[test]
     fn manipulate_aim_and_gen() -> anyhow::Result<()> {
-        let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+        let mut cnx =
+            Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
         let tx = cnx.conn().transaction()?;
 
         let p1: LocalPath = Path::new("/a/b").to_owned().into();
@@ -223,7 +225,8 @@ mod tests {
 
     #[test]
     fn complete_scan() -> anyhow::Result<()> {
-        let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+        let mut cnx =
+            Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
         let p1: LocalPath = Path::new("/a/b").to_owned().into();
 
         let got = |cnx: &mut Connection| -> anyhow::Result<Vec<(PathBuf, u64, u64, Option<bool>, Option<String>)>> {

@@ -21,6 +21,10 @@ CREATE TABLE File (
     -- The field is used by different states for different processing.
     next INTEGER,
 
+    -- Worst case for the next stage of processing of a file, in seconds since epoch.
+    -- Also used by different states for different processing.
+    threshold INTEGER,
+
     -- Filesystem-level fingerprint of the file.
     fsize INTEGER,
     mtime INTEGER,  -- microseconds
@@ -42,7 +46,7 @@ pub struct File {
     pub state: State,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum State {
     New(New),
     Dirty(Dirty),
@@ -52,37 +56,45 @@ pub enum State {
 }
 
 // New file. Transitions to Dirty or Unreadable after hashing.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct New {
-    // When the file should be hashed.
+    // When the file should be hashed. This is done right away even if
+    // the file is active, so that we can infer duplication and encryption
+    // group before any additional modification.
     pub next: TimeInSeconds,
 }
 
 // Dirty file. Transitions to Busy when being backed up.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Dirty {
-    // When the file should be backed up.
+    // Earliest time the file should be backed up.
     pub next: TimeInSeconds,
+    // Latest time a changing file can be postponed for backup.
+    pub threshold: TimeInSeconds,
     // Current snapshot of the file.
+    // TODO: do we want better types here to have the shallow and deep state
+    // explicitly spelled out?
     pub fsize: FileSize,
     pub mtime: TimeInMicroseconds,
-    pub hash: Vec<u8>,
+    pub hash: Vec<u8>, // TODO: make this a real type.
     // How should the file be encrypted.
     pub egroup: StoredEncryptionGroup,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Busy {
     pub egroup: StoredEncryptionGroup,
 }
 
 // Clean file. Transitions to Dirty or Unreadable after hashing or
 // scanning.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Clean {
     // When the file should be hashed.
     pub next: TimeInSeconds,
-    // Current snapshot of the file.
+    // Earliest time the file could be backed up again.
+    pub threshold: TimeInSeconds,
+    // Snapshot of the file at the time it was last backed up.
     pub fsize: FileSize,
     pub mtime: TimeInMicroseconds,
     pub hash: Vec<u8>,
@@ -91,7 +103,7 @@ pub struct Clean {
 }
 
 // Unreadable file. Transitions to New after hashing.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Unreadable {
     // When the file should be hashed / attempted to be read.
     pub next: TimeInSeconds,
@@ -202,6 +214,7 @@ pub fn set_state(
     state: &State,
 ) -> anyhow::Result<usize> {
     let mut next = None;
+    let mut threshold = None;
     let mut fsize = None;
     let mut mtime = None;
     let mut egroup = None;
@@ -214,6 +227,7 @@ pub fn set_state(
         }
         State::Dirty(state) => {
             next = Some(&state.next);
+            threshold = Some(&state.threshold);
             fsize = Some(&state.fsize);
             mtime = Some(&state.mtime);
             egroup = Some(&state.egroup);
@@ -226,6 +240,7 @@ pub fn set_state(
         }
         State::Clean(state) => {
             next = Some(&state.next);
+            threshold = Some(&state.threshold);
             fsize = Some(&state.fsize);
             mtime = Some(&state.mtime);
             egroup = Some(&state.egroup);
@@ -244,6 +259,7 @@ pub fn set_state(
           state = :state,
           tree_gen = :tree_gen,
           next = :next,
+          threshold = :threshold,
           fsize = :fsize,
           mtime = :mtime,
           egroup = :egroup,
@@ -255,6 +271,7 @@ pub fn set_state(
             ":path": path,
             ":tree_gen": &tree_gen,
             ":next": &next,
+            ":threshold": &threshold,
             ":state": &state,
             ":fsize": &fsize,
             ":mtime": &mtime,
@@ -270,7 +287,7 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
     txn.query_row(
         r#"
             SELECT
-              state, tree_gen, next,
+              state, tree_gen, next, threshold,
               fsize, mtime, hash, egroup, access_error
             FROM File WHERE path = :path
         "#,
@@ -279,11 +296,12 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
             let state: FileState = row.get(0)?;
             let tree_gen: i64 = row.get(1)?;
             let next: Option<TimeInSeconds> = row.get(2)?;
-            let fsize: Option<FileSize> = row.get(3)?;
-            let mtime: Option<TimeInMicroseconds> = row.get(4)?;
-            let hash: Option<Vec<u8>> = row.get(5)?;
-            let egroup: Option<StoredEncryptionGroup> = row.get(6)?;
-            let access_error: Option<String> = row.get(7)?;
+            let threshold: Option<TimeInSeconds> = row.get(3)?;
+            let fsize: Option<FileSize> = row.get(4)?;
+            let mtime: Option<TimeInMicroseconds> = row.get(5)?;
+            let hash: Option<Vec<u8>> = row.get(6)?;
+            let egroup: Option<StoredEncryptionGroup> = row.get(7)?;
+            let access_error: Option<String> = row.get(8)?;
             let state = match state {
                 FileState::New => State::New(New {
                     next: next
@@ -292,6 +310,9 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
                 FileState::Dirty => State::Dirty(Dirty {
                     next: next
                         .ok_or_else(|| FromSqlError::Other(anyhow!("missing next field").into()))?,
+                    threshold: threshold.ok_or_else(|| {
+                        FromSqlError::Other(anyhow!("missing threshold field").into())
+                    })?,
                     fsize: fsize.ok_or_else(|| {
                         FromSqlError::Other(anyhow!("missing fsize field").into())
                     })?,
@@ -312,6 +333,9 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
                 FileState::Clean => State::Clean(Clean {
                     next: next
                         .ok_or_else(|| FromSqlError::Other(anyhow!("missing next field").into()))?,
+                    threshold: threshold.ok_or_else(|| {
+                        FromSqlError::Other(anyhow!("missing threshold field").into())
+                    })?,
                     fsize: fsize.ok_or_else(|| {
                         FromSqlError::Other(anyhow!("missing fsize field").into())
                     })?,

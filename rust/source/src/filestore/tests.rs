@@ -1,4 +1,4 @@
-use super::{directory::pth as dh, file::pth as fh, *};
+use super::{directory::pth as dh, field::TimeInSeconds, file::pth as fh, *};
 use crate::filestore::file::File;
 use anyhow::bail;
 use crypto::model::EncryptionGroup;
@@ -7,13 +7,13 @@ use std::{
     cmp::max,
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 use test_log::test;
 
 #[test]
 fn add_and_remove_roots() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
     let got = |cnx: &mut Connection| -> anyhow::Result<Vec<(PathBuf, bool)>> {
         Ok(dh::dump(cnx.conn())?
             .into_iter()
@@ -38,7 +38,8 @@ fn add_and_remove_roots() -> anyhow::Result<()> {
 fn tree_scan_sequence() -> anyhow::Result<()> {
     // Let's validate that scans are scheduled as intended, and progress
     // correctly.
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let timing = Timing::default();
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
     let a = Path::new("a");
     let b = Path::new("b");
     cnx.set_roots(&[a, b])?;
@@ -48,8 +49,8 @@ fn tree_scan_sequence() -> anyhow::Result<()> {
     };
     assert_eq!(next, t(0)); // Not initialized yet: let's scan right away.
 
-    let next_time = t(86400); // Start a scan, and schedule the next one in a day.
-    cnx.tree_scan_start(next_time)?;
+    let now = t(1);
+    cnx.tree_scan_start(now)?;
 
     let (dir, mut updater) = cnx.tree_scan_next()?.next()?;
     assert_eq!(dir, a);
@@ -76,7 +77,7 @@ fn tree_scan_sequence() -> anyhow::Result<()> {
     let Next::Done(next) = cnx.tree_scan_next()? else {
         bail!("unexpected");
     };
-    assert_eq!(next, next_time);
+    assert_eq!(next, now + timing.scan_period);
 
     let got: Vec<(PathBuf, u64, u64)> = dh::dump(cnx.conn())?
         .into_iter()
@@ -106,7 +107,7 @@ fn tree_scan_sequence() -> anyhow::Result<()> {
 #[test]
 fn tree_rescan() -> anyhow::Result<()> {
     // Validate how files' next and gen evolve during successive scans.
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
 
@@ -192,7 +193,7 @@ fn tree_rescan() -> anyhow::Result<()> {
 
 #[test]
 fn tree_update_drop_is_noop() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
     let p1 = Path::new("/a");
     cnx.set_roots(&[p1])?;
 
@@ -210,11 +211,13 @@ fn tree_update_drop_is_noop() -> anyhow::Result<()> {
 
 #[test]
 fn tree_scan_with_errors() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let timing = Timing::default();
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
     let p1 = Path::new("/a/b");
     cnx.set_roots(&[p1])?;
 
-    cnx.tree_scan_start(t(0))?;
+    let mut now = t(1);
+    cnx.tree_scan_start(now)?;
     let (_, updater) = cnx.tree_scan_next()?.next()?;
     // Make it unreachable
     updater.error(std::io::Error::new(
@@ -234,14 +237,15 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
     );
 
     // ...and fix reachability at the next round.
-    cnx.tree_scan_start(t(0))?;
+    now = t(2);
+    cnx.tree_scan_start(now)?;
     let (_, updater) = cnx.tree_scan_next()?.next()?;
     updater.commit(true)?;
 
     let Next::Done(next) = cnx.tree_scan_next()? else {
         panic!("unexpected");
     };
-    assert_eq!(next, SystemTime::UNIX_EPOCH);
+    assert_eq!(next, now + timing.scan_period);
 
     let got: Vec<(PathBuf, Option<String>)> = dh::dump(cnx.conn())?
         .into_iter()
@@ -254,7 +258,7 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
 
 #[test]
 fn tree_scan_node_type_change() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()))?;
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
 
@@ -325,7 +329,11 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
 #[test]
 fn hash_next() -> anyhow::Result<()> {
     let egroup = egroup(1);
-    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
+    let timing = Timing::default();
+    let mut cnx = Connection::new_in_memory(
+        Arc::new(FakeRandom::new(vec![egroup.clone()])),
+        timing.clone(),
+    )?;
 
     let delta = Duration::from_secs(10);
     let hash_time = t(0) + delta;
@@ -365,8 +373,7 @@ fn hash_next() -> anyhow::Result<()> {
     let hash = digest::digest(&digest::SHA256, b"boo");
     cnx.hash_update(
         file,
-        /*next=*/ hash_time + delta * 2,
-        /*soon=*/ hash_time + delta,
+        hash_time,
         HashUpdate::Hash(Snapshot {
             fsize,
             mtime,
@@ -390,8 +397,8 @@ fn hash_next() -> anyhow::Result<()> {
             File {
                 tree_gen: 1,
                 state: State::Dirty(Dirty {
-                    // The file is made ready for backup "soon".
-                    next: (hash_time + delta).into(),
+                    next: (hash_time + timing.cool_off_period.0).into(),
+                    threshold: (hash_time + timing.cool_off_period.1).into(),
                     fsize,
                     mtime: mtime.into(),
                     hash: hash.as_ref().to_owned(),
@@ -408,10 +415,13 @@ fn hash_next() -> anyhow::Result<()> {
 fn small_files_dont_share_egroups() -> anyhow::Result<()> {
     let hash_time = t(100);
 
+    let timing = Timing::default();
     let eg1 = egroup(1);
     let eg2 = egroup(2);
-    let mut cnx =
-        Connection::new_in_memory(Arc::new(FakeRandom::new(vec![eg1.clone(), eg2.clone()])))?;
+    let mut cnx = Connection::new_in_memory(
+        Arc::new(FakeRandom::new(vec![eg1.clone(), eg2.clone()])),
+        timing.clone(),
+    )?;
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
     cnx.tree_scan_start(t(0))?;
@@ -425,8 +435,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
     let hash = digest::digest(&digest::SHA256, b"boo");
     cnx.hash_update(
         a.join("f1"),
-        /*next=*/ t(200),
-        /*soon=*/ t(110),
+        hash_time,
         HashUpdate::Hash(Snapshot {
             fsize,
             mtime,
@@ -435,8 +444,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
     )?;
     cnx.hash_update(
         a.join("f2"),
-        /*next=*/ t(200),
-        /*soon=*/ t(110),
+        hash_time,
         HashUpdate::Hash(Snapshot {
             fsize,
             mtime,
@@ -453,7 +461,8 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: secs(110), // The "soon" time of the update.
+                        next: (hash_time + timing.cool_off_period.0).into(),
+                        threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -466,7 +475,8 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: secs(110), // The "soon" time of the update.
+                        next: (hash_time + timing.cool_off_period.0).into(),
+                        threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -482,7 +492,11 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
 #[test]
 fn large_identical_files_share_egroups() -> anyhow::Result<()> {
     let egroup = egroup(1);
-    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
+    let timing = Timing::default();
+    let mut cnx = Connection::new_in_memory(
+        Arc::new(FakeRandom::new(vec![egroup.clone()])),
+        timing.clone(),
+    )?;
     let a = Path::new("a");
     cnx.set_roots(&[a])?;
     cnx.tree_scan_start(t(0))?;
@@ -491,13 +505,13 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
     updater.update(&ScanUpdate::File("f2".into(), t(0), 1, t(0)))?;
     updater.commit(true)?;
 
+    let hash_time = t(100);
     let fsize = 2 * SMALLEST_INDEPENDENT_FILE;
     let mtime = t(3600);
     let hash = digest::digest(&digest::SHA256, b"boo");
     cnx.hash_update(
         a.join("f1"),
-        /*next=*/ t(200),
-        /*soon=*/ t(110),
+        hash_time,
         HashUpdate::Hash(Snapshot {
             fsize,
             mtime,
@@ -506,8 +520,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
     )?;
     cnx.hash_update(
         a.join("f2"),
-        /*next=*/ t(200),
-        /*soon=*/ t(110),
+        hash_time,
         HashUpdate::Hash(Snapshot {
             fsize,
             mtime,
@@ -524,7 +537,8 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: secs(110),
+                        next: (hash_time + timing.cool_off_period.0).into(),
+                        threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -537,7 +551,8 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                 File {
                     tree_gen: 1,
                     state: State::Dirty(Dirty {
-                        next: secs(110),
+                        next: (hash_time + timing.cool_off_period.0).into(),
+                        threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
                         hash: hash.as_ref().to_owned(),
@@ -552,7 +567,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
 
 #[test]
 fn metadata_update_adds_file() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![])))?;
+    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![])), Timing::default())?;
     let a = Path::new("a");
 
     let next = t(321);
@@ -576,7 +591,7 @@ fn metadata_update_adds_file() -> anyhow::Result<()> {
 
 #[test]
 fn metadata_always_advance_tree_gen() -> anyhow::Result<()> {
-    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![])))?;
+    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![])), Timing::default())?;
 
     let root = PathBuf::from("r");
     let file = root.join("new");
@@ -617,18 +632,19 @@ fn metadata_always_advance_tree_gen() -> anyhow::Result<()> {
 #[test]
 fn full_cycle() -> anyhow::Result<()> {
     // Take a file through all its positive states (not including unreadable).
-
+    let timing = Timing::default();
     let egroup = egroup(1);
-    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
+    let mut cnx = Connection::new_in_memory(
+        Arc::new(FakeRandom::new(vec![egroup.clone()])),
+        timing.clone(),
+    )?;
 
     let root = Path::new("root");
     cnx.set_roots(&[&root])?;
 
-    let now = UNIX_EPOCH;
-    let soon = now + Duration::from_secs(100);
-    let next = now + Duration::from_secs(1000);
+    let mut now = t(1);
 
-    cnx.tree_scan_start(next)?;
+    cnx.tree_scan_start(now)?;
 
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "f1".into();
@@ -636,7 +652,7 @@ fn full_cycle() -> anyhow::Result<()> {
     updater.update(&ScanUpdate::File(f1, now, 100, f1_modtime))?;
     updater.commit(true)?;
 
-    let (to_hash, _) = cnx.hash_next(next)?.next()?;
+    let (to_hash, _) = cnx.hash_next(now)?.next()?;
     assert_eq!(&to_hash, Path::new("root/f1"));
 
     let hash = digest::digest(&digest::SHA256, b"boo");
@@ -645,10 +661,11 @@ fn full_cycle() -> anyhow::Result<()> {
         mtime: f1_modtime,
         hash: hash.clone(),
     };
-    cnx.hash_update(to_hash, next, soon, HashUpdate::Hash(snapshot.clone()))?;
+    cnx.hash_update(to_hash, now, HashUpdate::Hash(snapshot.clone()))?;
 
     // The file was hashed, and is expected to be ready to be backed up.
-    let Next::Next(to_backup, bk_egroup) = cnx.backup_next(soon)? else {
+    now += timing.cool_off_period.0;
+    let Next::Next(to_backup, bk_egroup) = cnx.backup_next(now)? else {
         panic!("unexepected");
     };
     assert_eq!(bk_egroup, egroup);
@@ -660,24 +677,26 @@ fn full_cycle() -> anyhow::Result<()> {
         vec![(Path::new("root/f1").to_owned(), egroup)]
     );
 
-    cnx.backup_done(to_backup, next, HashUpdate::Hash(snapshot.clone()))?;
+    cnx.backup_done(to_backup, now, HashUpdate::Hash(snapshot.clone()))?;
 
     Ok(())
 }
 
 #[test]
 fn hash_update_progession() -> anyhow::Result<()> {
+    let timing = Timing::default();
     let egroup = egroup(1);
-    let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![egroup.clone()])))?;
+    let mut cnx = Connection::new_in_memory(
+        Arc::new(FakeRandom::new(vec![egroup.clone()])),
+        timing.clone(),
+    )?;
 
     let root = Path::new("root");
     cnx.set_roots(&[&root])?;
 
-    let now = UNIX_EPOCH;
-    let soon = now + Duration::from_secs(100);
-    let next = now + Duration::from_secs(1000);
+    let mut now = t(1);
 
-    cnx.tree_scan_start(next)?;
+    cnx.tree_scan_start(now)?;
 
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "f1".into();
@@ -694,30 +713,25 @@ fn hash_update_progession() -> anyhow::Result<()> {
         mtime: f1_modtime,
         hash: hash.clone(),
     };
-    cnx.hash_update(path, next, soon, HashUpdate::Hash(snapshot.clone()))?;
+    cnx.hash_update(path, now, HashUpdate::Hash(snapshot.clone()))?;
 
     // Go through the motions of backup right now. This gets us a clean file.
-    let (path, _) = cnx.backup_next(soon)?.next()?;
+    now += timing.cool_off_period.0;
+    let (path, _) = cnx.backup_next(now)?.next()?;
     cnx.backup_start(path.clone())?;
-    cnx.backup_done(path, next, HashUpdate::Hash(snapshot.clone()))?;
-
-    let now = next;
-    let soon = now + Duration::from_secs(100);
-    let next = now + Duration::from_secs(1000);
+    cnx.backup_done(path, now, HashUpdate::Hash(snapshot.clone()))?;
 
     // If we hash the file and find no difference, we expect to re-hash only at |next|.
+    now += timing.hash_period;
     let (path, _) = cnx.hash_next(now)?.next()?;
-    cnx.hash_update(path, next, soon, HashUpdate::Hash(snapshot.clone()))?;
+    cnx.hash_update(path, now, HashUpdate::Hash(snapshot.clone()))?;
 
     let Next::Done(hash_next) = cnx.hash_next(now)? else {
         bail!("invalid state");
     };
-    assert_eq!(hash_next, next);
+    assert_eq!(hash_next, now + timing.hash_period);
 
-    let now = next;
-    let soon = now + Duration::from_secs(100);
-    let next = now + Duration::from_secs(1000);
-
+    now += timing.hash_period;
     let (path, _) = cnx.hash_next(now)?.next()?;
     let hash = digest::digest(&digest::SHA256, b"boo again");
     let snapshot = Snapshot {
@@ -725,9 +739,117 @@ fn hash_update_progession() -> anyhow::Result<()> {
         mtime: f1_modtime,
         hash: hash.clone(),
     };
-    cnx.hash_update(path, next, soon, HashUpdate::Hash(snapshot.clone()))?;
-    cnx.backup_next(soon)?.next()?;
+    cnx.hash_update(path, now, HashUpdate::Hash(snapshot.clone()))?;
+    cnx.backup_next(now + timing.cool_off_period.0)?.next()?;
 
+    Ok(())
+}
+
+#[test]
+fn no_cool_off_with_hash_updates() -> anyhow::Result<()> {
+    let timing = Timing::default();
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
+
+    let f = PathBuf::from("f");
+    let hash = digest::digest(&digest::SHA256, b"boo again");
+    let initial_state = State::Dirty(Dirty {
+        next: secs(1000),
+        threshold: secs(2000),
+        fsize: 123,
+        mtime: usecs(321),
+        hash: hash.as_ref().to_owned(),
+        egroup: egroup(1).into(),
+    });
+    let tree_gen = db_setup(
+        cnx.conn(),
+        vec![HashMap::from([(f.clone(), initial_state.clone())])],
+        vec![],
+    )?;
+
+    // Hashing reports a change between next and threshold.
+    let snapshot = Snapshot {
+        fsize: 456,
+        mtime: t(321),
+        hash: hash.clone(),
+    };
+    cnx.hash_update(f.clone(), t(1000), HashUpdate::Hash(snapshot.clone()))?;
+
+    // But hashing is not expected while in state Dirty: no change.
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            f,
+            File {
+                tree_gen: tree_gen,
+                state: initial_state,
+            }
+        )]
+    );
+    Ok(())
+}
+
+#[test]
+fn cool_off_with_metadata_update() -> anyhow::Result<()> {
+    let mut timing = Timing::default();
+    timing.cool_off_period.0 = Duration::from_secs(12);
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
+
+    let f = PathBuf::from("f");
+    let hash = digest::digest(&digest::SHA256, b"boo again");
+    let initial_state = Dirty {
+        next: secs(1000),
+        threshold: secs(2000),
+        fsize: 123,
+        mtime: usecs(321),
+        hash: hash.as_ref().to_owned(),
+        egroup: egroup(1).into(),
+    };
+    let tree_gen = db_setup(
+        cnx.conn(),
+        vec![HashMap::from([(
+            f.clone(),
+            State::Dirty(initial_state.clone()),
+        )])],
+        vec![],
+    )?;
+
+    // Metadata reports a change between next and threshold.
+    cnx.metadata_update(f.clone(), t(1000), 123, t(444))?;
+
+    // This causes the backup time to be pushed later than now.
+    let mut current_state = initial_state;
+    current_state.next = secs(1013); // now + cool_off.0
+
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            f.clone(),
+            File {
+                tree_gen: tree_gen,
+                state: State::Dirty(current_state.clone()),
+            }
+        )]
+    );
+
+    // Metadata reports a change much closer to threshold.
+    cnx.metadata_update(f.clone(), t(1999), 123, t(888))?;
+
+    // The new backup time is capped at threshold.
+    current_state.next = secs(2000);
+
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            f,
+            File {
+                tree_gen: tree_gen,
+                state: State::Dirty(current_state),
+            }
+        )]
+    );
     Ok(())
 }
 
@@ -743,6 +865,10 @@ fn t(secs: u64) -> SystemTime {
 }
 
 fn secs(secs: u64) -> TimeInSeconds {
+    t(secs).into()
+}
+
+fn usecs(secs: u64) -> TimeInMicroseconds {
     t(secs).into()
 }
 

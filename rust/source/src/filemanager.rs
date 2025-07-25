@@ -4,7 +4,7 @@
 use crate::{
     clock::{self, Clock},
     disk::{self, Disk},
-    filestore::{self, Connection, Filestore, HashUpdate, Next, ScanUpdate, Scanner},
+    filestore::{self, Connection, Filestore, HashUpdate, Next, ScanUpdate, Scanner, Timing},
     watcher,
 };
 use anyhow::{Context, bail};
@@ -32,11 +32,10 @@ pub struct FileManager {
 /// and will execute in the context of store_local.
 pub fn new(
     store_local: &LocalSet,
-    scan_period: Duration,
     db: &Path,
     rand: crypto::SharedRandom,
 ) -> anyhow::Result<FileManager> {
-    let store = Connection::new(db, rand)?;
+    let store = Connection::new(db, rand, Timing::default())?;
     let disk = disk::new()?;
     let clock = clock::new();
 
@@ -46,7 +45,6 @@ pub fn new(
         disk,
         clock,
         watcher::new()?,
-        scan_period,
     ))
 }
 
@@ -57,7 +55,6 @@ impl FileManager {
         disk: D,
         clock: C,
         watcher: Box<dyn watcher::Watcher + Send>,
-        scan_period: Duration,
     ) -> FileManager {
         let (tx, rx) = mpsc::channel::<Operation>(1);
         let mut runner = Runner {
@@ -65,7 +62,6 @@ impl FileManager {
             disk,
             clock,
             watcher,
-            scan_period,
         };
         let handle = store_local.spawn_local(async move {
             let result = runner.run(rx).await;
@@ -116,7 +112,6 @@ where
     disk: D,
     clock: C,
     watcher: Box<dyn watcher::Watcher + Send>,
-    scan_period: Duration,
 }
 
 fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
@@ -130,9 +125,6 @@ fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
         Duration::from_secs(0)
     }
 }
-
-const HASH_DELAY: Duration = Duration::from_secs(86400 * 7); // weekly
-const BACKUP_DELAY: Duration = Duration::from_secs(300);
 
 // The agent side of the manager. Holds the mutable store and watcher, and
 // performs the dispatching logic.
@@ -159,8 +151,7 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                         Ok(snapshot) => HashUpdate::Hash(snapshot),
                         Err(err) => HashUpdate::Unreadable(err),
                     };
-                    self.store
-                        .hash_update(file, now + HASH_DELAY, now + BACKUP_DELAY, update)?;
+                    self.store.hash_update(file, now, update)?;
                 }
                 Next::Done(delay) => {
                     tracing::debug!("no next file to hash, waiting until {:?}", isotime(delay));
@@ -222,7 +213,7 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                 _ = self.clock.sleep(scan_sleep, "tree_scan"), if scan_delay.is_some() => {
                     tracing::info!("ready to start a new tree scan");
                     scan_delay = None;
-                    if let Err(err) = self.store.tree_scan_start(now + self.scan_period) {
+                    if let Err(err) = self.store.tree_scan_start(now) {
                         tracing::error!("tree_scan_start() failed: {:?}", err);
                     }
                 }
@@ -254,7 +245,7 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                         Some(watcher::Update::File(path)) => {
                             tracing::debug!("Received watcher: {:?}", &path);
                             if let Ok((fsize, mtime)) = self.disk.metadata(&path) {
-                                self.store.metadata_update(path, now + BACKUP_DELAY, fsize, mtime)?;
+                                self.store.metadata_update(path, now, fsize, mtime)?;
                             }
                         },
                     }
@@ -271,8 +262,7 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
         // modified. Note that the roots are always set at least at startup, so
         // this needs to be conditional.
         if changed {
-            self.store
-                .tree_scan_start(self.clock.now() + self.scan_period)?;
+            self.store.tree_scan_start(self.clock.now())?;
         }
         Ok(())
     }

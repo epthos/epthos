@@ -31,15 +31,15 @@ pub enum FileState {
 pub struct LocalPath(LocalPathRepr);
 
 // A wrapper around a SystemTime that will store it in seconds.
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(PartialEq, Copy, Clone)]
 pub struct TimeInSeconds(pub SystemTime);
 
 // A wrapper around a SystemTime that will store it in microseconds.
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(PartialEq, Copy, Clone)]
 pub struct TimeInMicroseconds(pub SystemTime);
 
 // A wrapper around an EncryptionGroup
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq, Clone)]
 pub struct StoredEncryptionGroup(EncryptionGroup);
 
 // ------ Make rusqlite-friendly types -----
@@ -81,6 +81,13 @@ impl TimeInSeconds {
     }
 }
 
+impl std::fmt::Debug for TimeInSeconds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        isotime(self.0, f)?;
+        Ok(())
+    }
+}
+
 // -----------------
 
 impl FromSql for TimeInMicroseconds {
@@ -118,6 +125,13 @@ impl TimeInMicroseconds {
     #[allow(dead_code)]
     pub fn into_inner(self) -> SystemTime {
         self.0
+    }
+}
+
+impl std::fmt::Debug for TimeInMicroseconds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        isotime(self.0, f)?;
+        Ok(())
     }
 }
 
@@ -229,6 +243,33 @@ impl From<EncryptionGroup> for StoredEncryptionGroup {
 impl StoredEncryptionGroup {
     pub fn into_inner(self) -> EncryptionGroup {
         self.0
+    }
+}
+
+impl std::fmt::Debug for StoredEncryptionGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "0x")?;
+        for byte in self.0.as_bytes() {
+            write!(f, "{:02x?}", byte)?;
+        }
+        Ok(())
+    }
+}
+// --------------
+
+fn isotime<T>(dt: T, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+where
+    T: Into<time::OffsetDateTime>,
+{
+    match dt
+        .into()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+    {
+        Ok(timestamp) => {
+            f.write_str(&timestamp)?;
+            Ok(())
+        }
+        Err(_) => Err(std::fmt::Error {}),
     }
 }
 

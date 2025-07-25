@@ -1,12 +1,9 @@
 use super::{Server, peer};
-use crate::filemanager;
+use crate::filemanager::{self};
 use anyhow::Context;
 use settings::connection;
 use source_settings::Settings;
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 use storage::fingerprint;
 use tokio::task::LocalSet;
 
@@ -33,8 +30,6 @@ pub enum BuilderError {
     #[error("Unknown error")]
     UnknownError(#[from] anyhow::Error),
 }
-
-const TREE_SCAN_PERIOD: Duration = Duration::from_secs(3600);
 
 impl Builder {
     pub fn settings(self, settings: &Settings) -> Builder {
@@ -84,8 +79,7 @@ impl Builder {
         Ok(Server {
             roots: self.roots,
             _peer: peer,
-            manager: filemanager::new(store_local, TREE_SCAN_PERIOD, &self.db, rnd)
-                .context("Failed to open DB")?,
+            manager: filemanager::new(store_local, &self.db, rnd).context("Failed to open DB")?,
         })
     }
 }
