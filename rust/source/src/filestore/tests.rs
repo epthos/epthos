@@ -819,7 +819,7 @@ fn cool_off_with_metadata_update() -> anyhow::Result<()> {
 
     // This causes the backup time to be pushed later than now.
     let mut current_state = initial_state;
-    current_state.next = secs(1013); // now + cool_off.0
+    current_state.next = secs(1012); // now + cool_off.0
 
     let got = fh::dump(cnx.conn())?;
     assert_eq!(
