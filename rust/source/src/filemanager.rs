@@ -9,9 +9,10 @@ use crate::{
 };
 use anyhow::{Context, bail};
 use std::{
+    cmp::min,
     fs::{self, DirEntry},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
@@ -144,6 +145,7 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
             // hash_delay is assessed at every round as many operations can request a file be hashed,
             // independently of timing.
             let mut hash_delay: Option<SystemTime> = None;
+            let mut next_event = EarliestEvent::unset("nope");
             match self.store.hash_next(now)? {
                 Next::Next(file, ()) => {
                     tracing::debug!("hashing stale file {:?}", &file);
@@ -154,7 +156,7 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                     self.store.hash_update(file, now, update)?;
                 }
                 Next::Done(delay) => {
-                    tracing::debug!("no next file to hash, waiting until {:?}", isotime(delay));
+                    next_event = min(next_event, EarliestEvent::new(delay, "hash"));
                     hash_delay = Some(delay);
                 }
             }
@@ -165,14 +167,14 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                     self.store.backup_start(path)?;
                 }
                 Next::Done(delay) => {
-                    tracing::debug!("no next file to backup, waiting until {:?}", isotime(delay));
+                    next_event = min(next_event, EarliestEvent::new(delay, "backup"));
                     backup_delay = Some(delay);
                 }
             }
             if scan_delay.is_none() {
                 match self.store.tree_scan_next()? {
                     filestore::Next::Done(delay) => {
-                        tracing::info!("tree scan done, waiting until {:?}", isotime(delay));
+                        next_event = min(next_event, EarliestEvent::new(delay, "tree scan"));
                         scan_delay = Some(delay);
                     }
                     filestore::Next::Next(dir, mut updater) => {
@@ -204,25 +206,27 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
             let more_pending = [&scan_delay, &hash_delay, &backup_delay]
                 .iter()
                 .any(|d| d.is_none());
-            tracing::debug!("waiting for next action");
+            if !more_pending && next_event.is_valid() {
+                tracing::info!(
+                    "waiting for next {} at {}",
+                    next_event.event,
+                    isotime(next_event.time)?,
+                );
+            }
             tokio::select! {
                 _ = self.clock.sleep(Duration::from_millis(1), "tick"), if more_pending => {
                     // The artificial delay allows for pending events (client, watcher)
                     // to take place.
                 }
                 _ = self.clock.sleep(scan_sleep, "tree_scan"), if scan_delay.is_some() => {
-                    tracing::info!("ready to start a new tree scan");
+                    tracing::info!("starting a new tree scan");
                     scan_delay = None;
                     if let Err(err) = self.store.tree_scan_start(now) {
                         tracing::error!("tree_scan_start() failed: {:?}", err);
                     }
                 }
-                _ = self.clock.sleep(hash_sleep, "hash"), if hash_delay.is_some() => {
-                    tracing::debug!("ready to hash a new file");
-                }
-                _ = self.clock.sleep(back_sleep, "backup"), if backup_delay.is_some() => {
-                    tracing::debug!("ready to backup a new file");
-                }
+                _ = self.clock.sleep(hash_sleep, "hash"), if hash_delay.is_some() => { }
+                _ = self.clock.sleep(back_sleep, "backup"), if backup_delay.is_some() => { }
                 op = rx.recv() => {
                     tracing::debug!("handling client operation {:?}", &op);
                     match op {
@@ -243,7 +247,6 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                         // Directory changes are not supported, we'll rely on the tree scan.
                         Some(watcher::Update::Directory(_)) => {},
                         Some(watcher::Update::File(path)) => {
-                            tracing::debug!("Received watcher: {:?}", &path);
                             if let Ok((fsize, mtime)) = self.disk.metadata(&path) {
                                 self.store.metadata_update(path, now, fsize, mtime)?;
                             }
@@ -297,4 +300,82 @@ where
     dt.into()
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .context("can't format timestamp")
+}
+
+/// Helper type to track the earliest event that will happen next.
+struct EarliestEvent<'a> {
+    time: SystemTime,
+    event: &'a str,
+}
+
+impl<'a> EarliestEvent<'a> {
+    /// Create an invalid earliest event.
+    fn unset(name: &'a str) -> EarliestEvent<'a> {
+        EarliestEvent::new(UNIX_EPOCH, name)
+    }
+    fn new(time: SystemTime, event: &'a str) -> EarliestEvent<'a> {
+        EarliestEvent { time, event }
+    }
+    fn is_valid(&self) -> bool {
+        self.time != UNIX_EPOCH
+    }
+}
+
+impl std::cmp::Eq for EarliestEvent<'_> {}
+
+impl std::cmp::PartialOrd for EarliestEvent<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl std::cmp::PartialEq for EarliestEvent<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time
+    }
+}
+
+impl std::cmp::Ord for EarliestEvent<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.time == UNIX_EPOCH {
+            if other.time == UNIX_EPOCH {
+                std::cmp::Ordering::Equal
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        } else if other.time == UNIX_EPOCH {
+            std::cmp::Ordering::Less
+        } else {
+            self.time.cmp(&other.time)
+        }
+    }
+}
+
+#[cfg(test)]
+mod earliest_event_test {
+    use std::{
+        cmp::min,
+        time::{Duration, UNIX_EPOCH},
+    };
+
+    use crate::filemanager::EarliestEvent;
+
+    #[test]
+    fn ordered_as_intended() {
+        let mut earliest = EarliestEvent::unset("wrong");
+        assert!(!earliest.is_valid()); // we don't have an earliest event.
+
+        let t10 = UNIX_EPOCH + Duration::from_secs(10);
+        earliest = min(earliest, EarliestEvent::new(t10, "10s"));
+        // We expect any non epoch time to be earlier... (the weird part)
+        assert!(earliest.is_valid());
+        assert_eq!(earliest.time, t10);
+
+        let t5 = UNIX_EPOCH + Duration::from_secs(5);
+        earliest = min(earliest, EarliestEvent::new(t5, "5s"));
+        assert_eq!(earliest.time, t5);
+
+        let t15 = UNIX_EPOCH + Duration::from_secs(15);
+        earliest = min(earliest, EarliestEvent::new(t15, "15s"));
+        assert_eq!(earliest.time, t5);
+    }
 }
