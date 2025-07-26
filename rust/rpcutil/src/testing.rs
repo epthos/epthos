@@ -73,10 +73,7 @@ where
                     // Expose the required Hyper Read/Write traits thanks to TokioIo.
                     Ok(TokioIo::new(client))
                 } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Client already taken",
-                    ))
+                    Err(std::io::Error::other("Client already taken"))
                 }
             }
         }))

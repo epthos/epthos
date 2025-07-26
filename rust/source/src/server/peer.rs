@@ -23,6 +23,7 @@ use mockall::automock;
 #[async_trait]
 pub trait Peer {
     /// Send a chunk to the sink. Blocks until the sink is available.
+    #[allow(dead_code)] // TODO: use it!
     async fn send(&self, data: &model::Chunk) -> anyhow::Result<()>;
 }
 

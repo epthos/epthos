@@ -143,7 +143,7 @@ pub enum Next<Extra> {
 /// What is the next update to the directory?
 #[derive(Debug)]
 pub enum ScanUpdate {
-    /// (file name, time to next operation, file size, modification time)
+    /// (file name, current time, file size, modification time)
     File(OsString, SystemTime, FileSize, ModificationTime),
     Directory(OsString),
 }
@@ -440,15 +440,7 @@ impl Filestore for Connection {
         let file_repr: LocalPath = path.into();
         let mtime: TimeInMicroseconds = mtime.into();
         let mut tx = self.conn.transaction()?;
-        metadata_update(
-            &mut tx,
-            &file_repr,
-            next.into(),
-            None,
-            fsize,
-            mtime,
-            &self.timing,
-        )?;
+        metadata_update(&mut tx, &file_repr, next, None, fsize, mtime, &self.timing)?;
         tx.commit()?;
         Ok(())
     }
@@ -528,15 +520,14 @@ impl Filestore for Connection {
 
     fn backup_pending(&mut self) -> anyhow::Result<Vec<(PathBuf, EncryptionGroup)>> {
         let txn = self.conn.transaction()?;
-        let pending: anyhow::Result<Vec<(PathBuf, EncryptionGroup)>> = file::backup_pending(&txn)?
+        file::backup_pending(&txn)?
             .into_iter()
             .map(
                 |(path, egroup)| -> anyhow::Result<(PathBuf, EncryptionGroup)> {
                     Ok((path.try_into()?, egroup.into_inner()))
                 },
             )
-            .collect();
-        Ok(pending?)
+            .collect()
     }
 }
 
@@ -551,13 +542,13 @@ impl Scanner for UpdaterImpl<'_> {
                     directory::insert(&self.tx, &path, self.aim)?;
                 }
             }
-            ScanUpdate::File(file, next, fsize, mtime) => {
+            ScanUpdate::File(file, now, fsize, mtime) => {
                 let path: LocalPath = dir.join(file).into();
                 let mtime: TimeInMicroseconds = (*mtime).into();
                 metadata_update(
                     &mut self.tx,
                     &path,
-                    next.clone().into(),
+                    *now,
                     Some(self.aim),
                     *fsize,
                     mtime,

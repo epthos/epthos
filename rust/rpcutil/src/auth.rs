@@ -38,6 +38,7 @@ pub struct Sink {
 }
 
 /// Returns the Peer extracted by layer() or an error if it's unavailable.
+#[allow(clippy::result_large_err)]
 pub fn peer<T>(request: &Request<T>) -> Result<&Peer, Status> {
     Ok(request
         .extensions()
