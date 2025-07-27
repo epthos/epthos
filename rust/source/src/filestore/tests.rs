@@ -370,7 +370,7 @@ fn hash_next() -> anyhow::Result<()> {
 
     let fsize = 100;
     let mtime = t(3600);
-    let hash = digest::digest(&digest::SHA256, b"boo");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo").into();
     cnx.hash_update(
         file,
         hash_time,
@@ -401,7 +401,7 @@ fn hash_next() -> anyhow::Result<()> {
                     threshold: (hash_time + timing.cool_off_period.1).into(),
                     fsize,
                     mtime: mtime.into(),
-                    hash: hash.as_ref().to_owned(),
+                    hash: hash.into(),
                     egroup: egroup.into(),
                 })
             }
@@ -432,7 +432,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
 
     let fsize = 100;
     let mtime = t(3600);
-    let hash = digest::digest(&digest::SHA256, b"boo");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo").into();
     cnx.hash_update(
         a.join("f1"),
         hash_time,
@@ -465,7 +465,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                         threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
-                        hash: hash.as_ref().to_owned(),
+                        hash: hash.clone().into(),
                         egroup: eg1.into(),
                     })
                 }
@@ -479,7 +479,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                         threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
-                        hash: hash.as_ref().to_owned(),
+                        hash: hash.clone().into(),
                         egroup: eg2.into(),
                     })
                 }
@@ -508,7 +508,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
     let hash_time = t(100);
     let fsize = 2 * SMALLEST_INDEPENDENT_FILE;
     let mtime = t(3600);
-    let hash = digest::digest(&digest::SHA256, b"boo");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo").into();
     cnx.hash_update(
         a.join("f1"),
         hash_time,
@@ -541,7 +541,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                         threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
-                        hash: hash.as_ref().to_owned(),
+                        hash: hash.clone().into(),
                         egroup: egroup.clone().into(),
                     })
                 }
@@ -555,7 +555,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                         threshold: (hash_time + timing.cool_off_period.1).into(),
                         fsize,
                         mtime: mtime.into(),
-                        hash: hash.as_ref().to_owned(),
+                        hash: hash.clone().into(),
                         egroup: egroup.into(),
                     })
                 }
@@ -655,7 +655,7 @@ fn full_cycle() -> anyhow::Result<()> {
     let (to_hash, _) = cnx.hash_next(now)?.next()?;
     assert_eq!(&to_hash, Path::new("root/f1"));
 
-    let hash = digest::digest(&digest::SHA256, b"boo");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo").into();
     let snapshot = Snapshot {
         fsize: 100,
         mtime: f1_modtime,
@@ -707,7 +707,7 @@ fn hash_update_progession() -> anyhow::Result<()> {
     // File is ready to hash as of now.
     let (path, _) = cnx.hash_next(now)?.next()?;
     // The first hashing will necessarily make it Dirty for backup after |soon|.
-    let hash = digest::digest(&digest::SHA256, b"boo");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo").into();
     let snapshot = Snapshot {
         fsize: 100,
         mtime: f1_modtime,
@@ -733,7 +733,7 @@ fn hash_update_progession() -> anyhow::Result<()> {
 
     now += timing.hash_period;
     let (path, _) = cnx.hash_next(now)?.next()?;
-    let hash = digest::digest(&digest::SHA256, b"boo again");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo again").into();
     let snapshot = Snapshot {
         fsize: 100,
         mtime: f1_modtime,
@@ -751,13 +751,13 @@ fn no_cool_off_with_hash_updates() -> anyhow::Result<()> {
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
 
     let f = PathBuf::from("f");
-    let hash = digest::digest(&digest::SHA256, b"boo again");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo again").into();
     let initial_state = State::Dirty(Dirty {
         next: secs(1000),
         threshold: secs(2000),
         fsize: 123,
         mtime: usecs(321),
-        hash: hash.as_ref().to_owned(),
+        hash: hash.clone().into(),
         egroup: egroup(1).into(),
     });
     let tree_gen = db_setup(
@@ -796,13 +796,13 @@ fn cool_off_with_metadata_update() -> anyhow::Result<()> {
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
 
     let f = PathBuf::from("f");
-    let hash = digest::digest(&digest::SHA256, b"boo again");
+    let hash: FileHash = digest::digest(&digest::SHA256, b"boo again").into();
     let initial_state = Dirty {
         next: secs(1000),
         threshold: secs(2000),
         fsize: 123,
         mtime: usecs(321),
-        hash: hash.as_ref().to_owned(),
+        hash: hash.clone().into(),
         egroup: egroup(1).into(),
     };
     let tree_gen = db_setup(

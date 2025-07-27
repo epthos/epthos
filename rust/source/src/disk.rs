@@ -58,6 +58,6 @@ fn hash_file(path: &Path) -> Result<filestore::Snapshot, std::io::Error> {
     Ok(filestore::Snapshot {
         fsize: md.len(),
         mtime: md.modified()?,
-        hash: hasher.finish(),
+        hash: hasher.finish().into(),
     })
 }

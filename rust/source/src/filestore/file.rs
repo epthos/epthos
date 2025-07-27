@@ -1,6 +1,9 @@
 use super::{
     Snapshot,
-    field::{FileState, LocalPath, StoredEncryptionGroup, TimeInMicroseconds, TimeInSeconds},
+    field::{
+        FileState, LocalPath, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds,
+        TimeInSeconds,
+    },
 };
 use crate::model::FileSize;
 use anyhow::{Context, anyhow};
@@ -76,7 +79,7 @@ pub struct Dirty {
     // explicitly spelled out?
     pub fsize: FileSize,
     pub mtime: TimeInMicroseconds,
-    pub hash: Vec<u8>, // TODO: make this a real type.
+    pub hash: StoredFileHash,
     // How should the file be encrypted.
     pub egroup: StoredEncryptionGroup,
 }
@@ -97,7 +100,7 @@ pub struct Clean {
     // Snapshot of the file at the time it was last backed up.
     pub fsize: FileSize,
     pub mtime: TimeInMicroseconds,
-    pub hash: Vec<u8>,
+    pub hash: StoredFileHash,
     // How should the file be encrypted.
     pub egroup: StoredEncryptionGroup,
 }
@@ -299,7 +302,7 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
             let threshold: Option<TimeInSeconds> = row.get(3)?;
             let fsize: Option<FileSize> = row.get(4)?;
             let mtime: Option<TimeInMicroseconds> = row.get(5)?;
-            let hash: Option<Vec<u8>> = row.get(6)?;
+            let hash: Option<StoredFileHash> = row.get(6)?;
             let egroup: Option<StoredEncryptionGroup> = row.get(7)?;
             let access_error: Option<String> = row.get(8)?;
             let state = match state {
@@ -367,6 +370,7 @@ pub fn matching_egroup(
     txn: &Transaction,
     snapshot: &Snapshot,
 ) -> anyhow::Result<Option<StoredEncryptionGroup>> {
+    let hash: StoredFileHash = snapshot.hash.clone().into();
     txn.query_row(
         r#"
             SELECT
@@ -374,7 +378,7 @@ pub fn matching_egroup(
             FROM File WHERE hash = :hash AND fsize = :fsize
             LIMIT 1
         "#,
-        rusqlite::named_params! {":fsize": snapshot.fsize, ":hash": snapshot.hash.as_ref()},
+        rusqlite::named_params! {":fsize": snapshot.fsize, ":hash": hash},
         |row| {
             let egroup: StoredEncryptionGroup = row.get(0)?;
             Ok(egroup)

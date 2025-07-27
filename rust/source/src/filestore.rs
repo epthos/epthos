@@ -2,10 +2,10 @@
 //!
 //! This intentionally does _not_ perform any filesystem operations,
 //! to ensure testability and isolation.
-use crate::model::{FileSize, ModificationTime};
+use crate::model::{FileHash, FileSize, ModificationTime};
 use anyhow::{Context, bail};
 use crypto::{SharedRandom, model::EncryptionGroup};
-use field::{LocalPath, StoredEncryptionGroup, TimeInMicroseconds};
+use field::{LocalPath, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds};
 use file::{Busy, Clean, Dirty, New, State, Unreadable};
 use rusqlite::Transaction;
 use rusqlite_migration::Migrations;
@@ -157,7 +157,7 @@ pub enum HashUpdate {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    pub hash: ring::digest::Digest,
+    pub hash: FileHash,
     pub fsize: FileSize,
     pub mtime: ModificationTime,
 }
@@ -353,12 +353,13 @@ impl Filestore for Connection {
         let Some(current) = file::get_state(&tx, &file_repr)? else {
             anyhow::bail!("file [{:?}] is expected to be in db", &file_repr);
         };
-        match &update {
+        match update {
             HashUpdate::Hash(snapshot) => {
                 match current.state {
                     // Either NEW or UNREADABLE deserve a shot at a backup once we have
                     // enough information about them, in particular their egroup.
                     State::New(_) | State::Unreadable(_) => {
+                        let egroup = pick_egroup(&tx, &snapshot, self.rand.clone())?;
                         file::set_state(
                             &tx,
                             &file_repr,
@@ -369,10 +370,10 @@ impl Filestore for Connection {
                                 threshold: (now + self.timing.cool_off_period.1).into(),
                                 fsize: snapshot.fsize,
                                 mtime: snapshot.mtime.into(),
-                                hash: snapshot.hash.as_ref().to_owned(),
+                                hash: snapshot.hash.into(),
                                 // TODO: we probably want to reuse the same egroup when
                                 // going from UNREADABLE back to readable?
-                                egroup: pick_egroup(&tx, snapshot, self.rand.clone())?,
+                                egroup,
                             }),
                         )?;
                     }
@@ -386,7 +387,8 @@ impl Filestore for Connection {
                     // the file is still CLEAN.
                     State::Clean(mut old) => {
                         let mtime: TimeInMicroseconds = snapshot.mtime.into();
-                        let next_state = if snapshot.hash.as_ref() != old.hash
+                        let hash: StoredFileHash = snapshot.hash.into();
+                        let next_state = if hash != old.hash
                             || mtime != old.mtime
                             || snapshot.fsize != old.fsize
                         {
@@ -400,8 +402,8 @@ impl Filestore for Connection {
                                 next: earliest_backup.into(),
                                 threshold: latest_backup.into(),
                                 fsize: snapshot.fsize,
-                                mtime: snapshot.mtime.into(),
-                                hash: snapshot.hash.as_ref().to_owned(),
+                                mtime,
+                                hash,
                                 egroup: old.egroup,
                             })
                         } else {
@@ -501,7 +503,7 @@ impl Filestore for Connection {
                         threshold: earliest_backup.into(),
                         fsize: snapshot.fsize,
                         mtime: snapshot.mtime.into(),
-                        hash: snapshot.hash.as_ref().to_owned(),
+                        hash: snapshot.hash.into(),
                         egroup: busy.egroup,
                     })
                 }

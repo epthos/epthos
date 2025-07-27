@@ -7,6 +7,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use crate::model::{FileHash, FileHashConversionError};
+
 /// States a file will go through.
 ///
 /// Careful, the enum values are stored permanently. Do not change.
@@ -41,6 +43,10 @@ pub struct TimeInMicroseconds(pub SystemTime);
 // A wrapper around an EncryptionGroup
 #[derive(PartialEq, Clone)]
 pub struct StoredEncryptionGroup(EncryptionGroup);
+
+// A wrapper around a FileHash.
+#[derive(Debug, PartialEq, Clone)]
+pub struct StoredFileHash(FileHash);
 
 // ------ Make rusqlite-friendly types -----
 
@@ -255,6 +261,35 @@ impl std::fmt::Debug for StoredEncryptionGroup {
         Ok(())
     }
 }
+
+// --------------
+
+impl FromSql for StoredFileHash {
+    fn column_result(value: ValueRef<'_>) -> types::FromSqlResult<Self> {
+        let types::ValueRef::Blob(blob) = value else {
+            return Err(FromSqlError::InvalidType);
+        };
+        let hash: FileHash = blob
+            .try_into()
+            .map_err(|e: FileHashConversionError| FromSqlError::Other(e.into()))?;
+        Ok(StoredFileHash(hash))
+    }
+}
+
+impl ToSql for StoredFileHash {
+    fn to_sql(&self) -> rusqlite::Result<types::ToSqlOutput<'_>> {
+        Ok(types::ToSqlOutput::Borrowed(ValueRef::Blob(
+            self.0.as_ref(),
+        )))
+    }
+}
+
+impl From<FileHash> for StoredFileHash {
+    fn from(value: FileHash) -> Self {
+        StoredFileHash(value)
+    }
+}
+
 // --------------
 
 fn isotime<T>(dt: T, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
@@ -365,6 +400,20 @@ mod tests {
         };
         let back = StoredEncryptionGroup::column_result(repr).context("result")?;
         assert_eq!(back, eg);
+        Ok(())
+    }
+
+    #[test]
+    fn file_hash_is_reversible() -> anyhow::Result<()> {
+        let d = ring::digest::digest(&ring::digest::SHA256, b"foo");
+        let h: FileHash = d.into();
+        let fh: StoredFileHash = h.into();
+
+        let ToSqlOutput::Borrowed(repr) = fh.to_sql().context("to_sql")? else {
+            panic!("unexpected");
+        };
+        let back = StoredFileHash::column_result(repr).context("result")?;
+        assert_eq!(back, fh);
         Ok(())
     }
 }
