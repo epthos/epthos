@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    disk::ScanEntry,
     filestore::{self, HashUpdate, Next},
     model::{FileSize, ModificationTime},
 };
@@ -286,7 +287,19 @@ impl FakeDisk {
     }
 }
 
-impl Disk for FakeDisk {}
+impl Disk for FakeDisk {
+    fn scan(&self, _path: &Path) -> anyhow::Result<disk::ScanIterator> {
+        todo!()
+    }
+
+    fn metadata(&self, _path: &Path) -> anyhow::Result<(FileSize, ModificationTime)> {
+        todo!()
+    }
+
+    fn snapshot(&self, _path: &Path) -> std::io::Result<disk::Snapshot> {
+        todo!()
+    }
+}
 
 struct FakeWatcher {
     state: Arc<Mutex<WatcherState>>,
@@ -402,7 +415,7 @@ impl Filestore for FakeStore {
 
 struct FakeUpdater {}
 impl filestore::Scanner for FakeUpdater {
-    fn update(&mut self, _: &filestore::ScanUpdate) -> anyhow::Result<()> {
+    fn update(&mut self, _now: SystemTime, _: &ScanEntry) -> anyhow::Result<()> {
         todo!()
     }
 
@@ -410,7 +423,7 @@ impl filestore::Scanner for FakeUpdater {
         Ok(())
     }
 
-    fn error(self, _error: std::io::Error) -> anyhow::Result<()> {
+    fn error(self, _error: anyhow::Error) -> anyhow::Result<()> {
         todo!()
     }
 }

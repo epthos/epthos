@@ -2,7 +2,10 @@
 //!
 //! This intentionally does _not_ perform any filesystem operations,
 //! to ensure testability and isolation.
-use crate::model::{FileHash, FileSize, ModificationTime};
+use crate::{
+    disk::{ScanEntry, Snapshot},
+    model::{FileSize, ModificationTime},
+};
 use anyhow::{Context, bail};
 use crypto::{SharedRandom, model::EncryptionGroup};
 use field::{LocalPath, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds};
@@ -12,7 +15,6 @@ use rusqlite_migration::Migrations;
 use settings::Setting;
 use std::{
     cmp::{max, min},
-    ffi::OsString,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -125,11 +127,11 @@ pub trait Filestore {
 pub trait Scanner {
     /// Call update() repeatedly for all the results in the filesystem.
     /// Any skipped entry will be considered as missing in the next pass.
-    fn update(&mut self, update: &ScanUpdate) -> anyhow::Result<()>;
+    fn update(&mut self, now: SystemTime, update: &ScanEntry) -> anyhow::Result<()>;
     /// Once done, call commit() to indicate that the directory is processed.
     fn commit(self, complete: bool) -> anyhow::Result<()>;
     /// Alternatively, if the directory cannot be read at all, call error().
-    fn error(self, error: std::io::Error) -> anyhow::Result<()>;
+    fn error(self, error: anyhow::Error) -> anyhow::Result<()>;
 }
 
 /// Next helps with the common pattern of returning elements based on timing.
@@ -140,14 +142,6 @@ pub enum Next<Extra> {
     Done(SystemTime),
 }
 
-/// What is the next update to the directory?
-#[derive(Debug)]
-pub enum ScanUpdate {
-    /// (file name, current time, file size, modification time)
-    File(OsString, SystemTime, FileSize, ModificationTime),
-    Directory(OsString),
-}
-
 /// Represents the file hash update.
 #[derive(Debug)]
 pub enum HashUpdate {
@@ -155,15 +149,8 @@ pub enum HashUpdate {
     Unreadable(std::io::Error),
 }
 
-#[derive(Debug, Clone)]
-pub struct Snapshot {
-    pub hash: FileHash,
-    pub fsize: FileSize,
-    pub mtime: ModificationTime,
-}
-
 impl<Extra> Next<Extra> {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used by tests at least.
     pub fn next(self) -> anyhow::Result<(PathBuf, Extra)> {
         match self {
             Next::Done(_) => bail!("no next element"),
@@ -534,23 +521,23 @@ impl Filestore for Connection {
 }
 
 impl Scanner for UpdaterImpl<'_> {
-    fn update(&mut self, update: &ScanUpdate) -> anyhow::Result<()> {
+    fn update(&mut self, now: SystemTime, update: &ScanEntry) -> anyhow::Result<()> {
         let dir: PathBuf = self.dir.clone().try_into()?;
         match update {
-            ScanUpdate::Directory(subdir) => {
+            ScanEntry::Directory(subdir) => {
                 let path: LocalPath = dir.join(subdir).into();
                 let count = directory::set_path_aim(&self.tx, self.aim, &path)?;
                 if count == 0 {
                     directory::insert(&self.tx, &path, self.aim)?;
                 }
             }
-            ScanUpdate::File(file, now, fsize, mtime) => {
+            ScanEntry::File(file, fsize, mtime) => {
                 let path: LocalPath = dir.join(file).into();
                 let mtime: TimeInMicroseconds = (*mtime).into();
                 metadata_update(
                     &mut self.tx,
                     &path,
-                    *now,
+                    now,
                     Some(self.aim),
                     *fsize,
                     mtime,
@@ -567,7 +554,7 @@ impl Scanner for UpdaterImpl<'_> {
         Ok(())
     }
 
-    fn error(self, error: std::io::Error) -> anyhow::Result<()> {
+    fn error(self, error: anyhow::Error) -> anyhow::Result<()> {
         directory::update_dir_error(&self.tx, &self.dir, self.aim, format!("{:?}", error))?;
         self.tx.commit()?;
         Ok(())

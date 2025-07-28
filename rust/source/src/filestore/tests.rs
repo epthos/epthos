@@ -1,11 +1,12 @@
 use super::{directory::pth as dh, field::TimeInSeconds, file::pth as fh, *};
-use crate::filestore::file::File;
+use crate::{filestore::file::File, model::FileHash};
 use anyhow::bail;
 use crypto::model::EncryptionGroup;
 use ring::digest;
 use std::{
     cmp::max,
     collections::{HashMap, HashSet, VecDeque},
+    ffi::OsString,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -58,7 +59,7 @@ fn tree_scan_sequence() -> anyhow::Result<()> {
     let hash_time = t(3210);
     let f1: OsString = "f1".into();
     let f1_modtime = t(1000);
-    updater.update(&ScanUpdate::File(f1, hash_time, 100, f1_modtime))?;
+    updater.update(hash_time, &ScanEntry::File(f1, 100, f1_modtime))?;
     updater.commit(true)?;
 
     // Move on to the next directory.
@@ -66,7 +67,7 @@ fn tree_scan_sequence() -> anyhow::Result<()> {
     assert_eq!(dir, b);
 
     let e: OsString = "e".into();
-    updater.update(&ScanUpdate::Directory(e))?;
+    updater.update(hash_time, &ScanEntry::Directory(e))?;
     updater.commit(true)?;
 
     let (dir, updater) = cnx.tree_scan_next()?.next()?;
@@ -132,10 +133,10 @@ fn tree_rescan() -> anyhow::Result<()> {
 
     // f2 disappeared, f3 appeared.
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File("f1".into(), t2, 3, t(300)))?;
-    updater.update(&ScanUpdate::File("f3".into(), t2, 4, t(400)))?;
-    updater.update(&ScanUpdate::Directory("d1".into()))?;
-    updater.update(&ScanUpdate::Directory("d3".into()))?;
+    updater.update(t2, &ScanEntry::File("f1".into(), 3, t(300)))?;
+    updater.update(t2, &ScanEntry::File("f3".into(), 4, t(400)))?;
+    updater.update(t2, &ScanEntry::Directory("d1".into()))?;
+    updater.update(t2, &ScanEntry::Directory("d3".into()))?;
     updater.commit(true)?;
 
     let (_, updater) = cnx.tree_scan_next()?.next()?;
@@ -200,7 +201,7 @@ fn tree_update_drop_is_noop() -> anyhow::Result<()> {
     cnx.tree_scan_start(t(0))?;
     {
         let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-        updater.update(&ScanUpdate::File("b".into(), t(100), 1, t(200)))?;
+        updater.update(t(100), &ScanEntry::File("b".into(), 1, t(200)))?;
     }
     // Despite the update(File()) above, the lack of commit means the db was not
     // altered.
@@ -220,21 +221,16 @@ fn tree_scan_with_errors() -> anyhow::Result<()> {
     cnx.tree_scan_start(now)?;
     let (_, updater) = cnx.tree_scan_next()?.next()?;
     // Make it unreachable
-    updater.error(std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        "get out",
-    ))?;
-    let got: Vec<(PathBuf, Option<String>)> = dh::dump(cnx.conn())?
+    updater.error(anyhow::format_err!("boom"))?;
+    let mut got: Vec<(PathBuf, Option<String>)> = dh::dump(cnx.conn())?
         .into_iter()
         .map(|d| (d.path, d.error))
         .collect();
-    assert_eq!(
-        got,
-        vec![(
-            p1.into(),
-            Some("Custom { kind: PermissionDenied, error: \"get out\" }".to_string()),
-        )]
-    );
+    assert_eq!(got.len(), 1);
+    let Some(err) = got.remove(0).1 else {
+        panic!("unexpected");
+    };
+    assert!(err.contains("boom"));
 
     // ...and fix reachability at the next round.
     now = t(2);
@@ -269,14 +265,14 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
     // Make a/b a file first.
     let t1 = t(100);
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File(b.clone(), t1, 1, t(1)))?;
+    updater.update(t1, &ScanEntry::File(b.clone(), 1, t(1)))?;
     updater.commit(true)?;
 
     cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
 
     // Make a/b a directory next.
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::Directory(b.clone()))?;
+    updater.update(t1, &ScanEntry::Directory(b.clone()))?;
     updater.commit(true)?;
 
     let (_, updater) = cnx.tree_scan_next()?.next()?;
@@ -299,7 +295,7 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
 
     let t2 = t(200);
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File(b.clone(), t2, 1, t(1)))?;
+    updater.update(t2, &ScanEntry::File(b.clone(), 1, t(1)))?;
     updater.commit(true)?;
 
     // The file is back on the scan.
@@ -349,7 +345,7 @@ fn hash_next() -> anyhow::Result<()> {
 
     cnx.tree_scan_start(t(86400))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File("f1".into(), hash_time.into(), 1, t(10)))?;
+    updater.update(hash_time, &ScanEntry::File("f1".into(), 1, t(10)))?;
     updater.commit(true)?;
 
     // From now on, file a/f1 is in the database, but with no hash yet.
@@ -426,8 +422,8 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
     cnx.set_roots(&[a])?;
     cnx.tree_scan_start(t(0))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File("f1".into(), hash_time, 1, t(0)))?;
-    updater.update(&ScanUpdate::File("f2".into(), hash_time, 1, t(0)))?;
+    updater.update(hash_time, &ScanEntry::File("f1".into(), 1, t(0)))?;
+    updater.update(hash_time, &ScanEntry::File("f2".into(), 1, t(0)))?;
     updater.commit(true)?;
 
     let fsize = 100;
@@ -501,8 +497,8 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
     cnx.set_roots(&[a])?;
     cnx.tree_scan_start(t(0))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(&ScanUpdate::File("f1".into(), t(0), 1, t(0)))?;
-    updater.update(&ScanUpdate::File("f2".into(), t(0), 1, t(0)))?;
+    updater.update(t(0), &ScanEntry::File("f1".into(), 1, t(0)))?;
+    updater.update(t(0), &ScanEntry::File("f2".into(), 1, t(0)))?;
     updater.commit(true)?;
 
     let hash_time = t(100);
@@ -612,7 +608,7 @@ fn metadata_always_advance_tree_gen() -> anyhow::Result<()> {
     cnx.tree_scan_start(t(200))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "new".into();
-    updater.update(&ScanUpdate::File(f1, scan_next, 100, t(321)))?;
+    updater.update(scan_next, &ScanEntry::File(f1, 100, t(321)))?;
     updater.commit(true)?;
 
     let got = fh::dump(cnx.conn())?;
@@ -649,7 +645,7 @@ fn full_cycle() -> anyhow::Result<()> {
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "f1".into();
     let f1_modtime = now + Duration::from_secs(231);
-    updater.update(&ScanUpdate::File(f1, now, 100, f1_modtime))?;
+    updater.update(now, &ScanEntry::File(f1, 100, f1_modtime))?;
     updater.commit(true)?;
 
     let (to_hash, _) = cnx.hash_next(now)?.next()?;
@@ -701,7 +697,7 @@ fn hash_update_progession() -> anyhow::Result<()> {
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "f1".into();
     let f1_modtime = now + Duration::from_secs(231);
-    updater.update(&ScanUpdate::File(f1, now, 100, f1_modtime))?;
+    updater.update(now, &ScanEntry::File(f1, 100, f1_modtime))?;
     updater.commit(true)?;
 
     // File is ready to hash as of now.

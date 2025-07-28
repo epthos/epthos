@@ -4,13 +4,12 @@
 use crate::{
     clock::{self, Clock},
     disk::{self, Disk},
-    filestore::{self, Connection, Filestore, HashUpdate, Next, ScanUpdate, Scanner, Timing},
+    filestore::{self, Connection, Filestore, HashUpdate, Next, Scanner, Timing},
     watcher,
 };
-use anyhow::{Context, bail};
+use anyhow::Context;
 use std::{
     cmp::min,
-    fs::{self, DirEntry},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -179,13 +178,12 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
                     }
                     filestore::Next::Next(dir, mut updater) => {
                         tracing::debug!("scanning {:?}", &dir);
-                        // TODO: move to disk module.
-                        match fs::read_dir(&dir) {
+                        match self.disk.scan(&dir) {
                             Ok(subdirs) => {
                                 let mut complete = true;
                                 for entry in subdirs {
-                                    match scan_entry(entry) {
-                                        Ok(entry) => updater.update(&entry)?,
+                                    match entry {
+                                        Ok(entry) => updater.update(self.clock.now(), &entry)?,
                                         Err(_) => complete = false,
                                     }
                                 }
@@ -268,28 +266,6 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
             self.store.tree_scan_start(self.clock.now())?;
         }
         Ok(())
-    }
-}
-
-fn scan_entry(entry: std::io::Result<DirEntry>) -> anyhow::Result<ScanUpdate> {
-    let entry = entry.context("invalid entry")?;
-    let file_type = entry.file_type().context("file_type()")?;
-    if file_type.is_file() {
-        let md = entry.metadata().context("metadata")?;
-        Ok(ScanUpdate::File(
-            entry.file_name(),
-            SystemTime::now(),
-            md.len(),
-            md.modified()?,
-        ))
-    } else if file_type.is_dir() {
-        Ok(ScanUpdate::Directory(entry.file_name()))
-    } else if file_type.is_symlink() {
-        // TODO: represent symlinks?
-        bail!("symlinks are not supported yet");
-    } else {
-        tracing::info!("file [{:?}] has unsupported type", &entry);
-        bail!("unsupported entry {:?}", entry);
     }
 }
 
