@@ -12,7 +12,7 @@ pub struct Builder {
     roots: Vec<PathBuf>,
     connection: Option<connection::Info>,
     broker: Option<broker_client::Settings>,
-    db: PathBuf,
+    filestore: PathBuf,
     rnd: Option<crypto::SharedRandom>,
     source_key: Option<crypto::Keys>,
 }
@@ -36,7 +36,7 @@ impl Builder {
         self.roots(settings.backup().roots().clone())
             .connection(settings.connection())
             .broker(settings.broker())
-            .db(settings.backup().db())
+            .filestore(settings.filestore().db())
     }
 
     pub fn roots(mut self, roots: Vec<PathBuf>) -> Builder {
@@ -54,8 +54,8 @@ impl Builder {
         self
     }
 
-    pub fn db(mut self, path: &Path) -> Builder {
-        self.db = path.to_path_buf();
+    pub fn filestore(mut self, path: &Path) -> Builder {
+        self.filestore = path.to_path_buf();
         self
     }
 
@@ -79,7 +79,8 @@ impl Builder {
         Ok(Server {
             roots: self.roots,
             _peer: peer,
-            manager: filemanager::new(store_local, &self.db, rnd).context("Failed to open DB")?,
+            manager: filemanager::new(store_local, &self.filestore, rnd)
+                .context("Failed to open DB")?,
         })
     }
 }

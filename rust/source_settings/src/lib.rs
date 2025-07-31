@@ -16,12 +16,17 @@ pub struct Settings {
     connection: connection::Settings,
     process: process::Settings,
     backup: Backup,
+    filestore: Filestore,
 }
 
 /// Backup-related settings.
 pub struct Backup {
     root: Vec<PathBuf>,
     keyfile: PathBuf,
+}
+
+/// Filestore-related settings.
+pub struct Filestore {
     db: PathBuf,
 }
 
@@ -41,6 +46,10 @@ impl Settings {
     pub fn backup(&self) -> &Backup {
         &self.backup
     }
+
+    pub fn filestore(&self) -> &Filestore {
+        &self.filestore
+    }
 }
 
 impl Backup {
@@ -52,7 +61,9 @@ impl Backup {
     pub fn keyfile(&self) -> &Path {
         &self.keyfile
     }
+}
 
+impl Filestore {
     pub fn db(&self) -> &Path {
         &self.db
     }
@@ -120,8 +131,10 @@ impl Builder {
             },
             backup: wire::Backup {
                 root: self.root,
-                db: "db".into(),
                 keyfile: "keyfile".into(),
+            },
+            filestore: wire::Filestore {
+                db: "filestore".into(),
             },
         };
         settings::save(&settings, NAME, anchor)?;
@@ -160,6 +173,7 @@ mod wire {
         pub connection: connection::wire::Settings,
         pub process: process::wire::Settings,
         pub backup: Backup,
+        pub filestore: Filestore,
     }
 
     /// Settings related to data backup.
@@ -167,6 +181,10 @@ mod wire {
     pub struct Backup {
         pub root: Vec<PathBuf>,
         pub keyfile: settings::ConfigPath,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Filestore {
         pub db: settings::ConfigPath,
     }
 }
@@ -180,6 +198,7 @@ impl settings::Anchored for Settings {
             connection: connection::Settings::anchor(&wire.connection, anchor)?,
             process: process::Settings::anchor(&wire.process, anchor)?,
             backup: Backup::anchor(&wire.backup, anchor)?,
+            filestore: Filestore::anchor(&wire.filestore, anchor)?,
         })
     }
 }
@@ -191,6 +210,15 @@ impl settings::Anchored for Backup {
         Ok(Backup {
             root: wire.root.clone(),
             keyfile: wire.keyfile.path(anchor),
+        })
+    }
+}
+
+impl settings::Anchored for Filestore {
+    type Wire = wire::Filestore;
+
+    fn anchor(wire: &Self::Wire, anchor: &settings::Anchor) -> anyhow::Result<Self> {
+        Ok(Filestore {
             db: wire.db.path(anchor),
         })
     }
@@ -246,8 +274,8 @@ mod test {
 
         let settings = load_impl(&anchor)?;
         assert_eq!(settings.backup().roots(), &roots);
-        assert_eq!(settings.backup().db(), cfg.join("db"));
         assert_eq!(settings.backup().keyfile(), cfg.join("keyfile"));
+        assert_eq!(settings.filestore().db(), cfg.join("filestore"));
         // TODO: validate certificates
         Ok(())
     }
