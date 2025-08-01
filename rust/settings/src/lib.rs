@@ -22,7 +22,7 @@
 //!   let fragment : my_fragment::Settings = settings::load("service", &anchor)?;
 //!
 use anyhow::Context;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -187,10 +187,11 @@ pub mod process {
 
     /// Initializes the process with the provided settings.
     pub fn init(settings: &Settings) -> anyhow::Result<Option<impl Drop>> {
-        let logging = tracing_subscriber::fmt::layer().with_filter(settings.trace_level());
+        let logging = tracing_subscriber::fmt::layer()
+            .with_thread_ids(true)
+            .with_filter(settings.trace_level());
 
         if let Ok(flame) = std::env::var("EPTHOS_FLAME") {
-            // TODO: get rid of unwrap here.
             let (flame_layer, guard) = tracing_flame::FlameLayer::with_file(flame)?;
             tracing_subscriber::registry()
                 .with(logging)
