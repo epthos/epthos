@@ -1,5 +1,8 @@
 use super::{Server, peer};
-use crate::filemanager::{self};
+use crate::{
+    datamanager,
+    filemanager::{self},
+};
 use anyhow::Context;
 use settings::connection;
 use source_settings::Settings;
@@ -13,6 +16,7 @@ pub struct Builder {
     connection: Option<connection::Info>,
     broker: Option<broker_client::Settings>,
     filestore: PathBuf,
+    datastore: PathBuf,
     rnd: Option<crypto::SharedRandom>,
     source_key: Option<crypto::Keys>,
 }
@@ -37,6 +41,7 @@ impl Builder {
             .connection(settings.connection())
             .broker(settings.broker())
             .filestore(settings.filestore().db())
+            .datastore(settings.datastore().db())
     }
 
     pub fn roots(mut self, roots: Vec<PathBuf>) -> Builder {
@@ -59,6 +64,11 @@ impl Builder {
         self
     }
 
+    pub fn datastore(mut self, path: &Path) -> Builder {
+        self.datastore = path.to_path_buf();
+        self
+    }
+
     pub fn crypto(mut self, rnd: crypto::SharedRandom, source_key: crypto::Keys) -> Builder {
         self.rnd = Some(rnd);
         self.source_key = Some(source_key);
@@ -67,7 +77,8 @@ impl Builder {
 
     pub async fn build(
         self,
-        store_local: &LocalSet,
+        fm_local: &LocalSet,
+        dm_local: &LocalSet,
     ) -> Result<Server<peer::PeerImpl>, BuilderError> {
         let connection = self.connection.ok_or(BuilderError::MissingConnection)?;
         let broker_info = self.broker.ok_or(BuilderError::MissingBrokerInfo)?;
@@ -79,8 +90,10 @@ impl Builder {
         Ok(Server {
             roots: self.roots,
             _peer: peer,
-            manager: filemanager::new(store_local, &self.filestore, rnd)
+            manager: filemanager::new(fm_local, &self.filestore, rnd)
                 .context("Failed to open DB")?,
+            datamanager: datamanager::new(dm_local, &self.datastore)
+                .context("failed to create Datamanager")?,
         })
     }
 }

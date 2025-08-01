@@ -17,6 +17,7 @@ pub struct Settings {
     process: process::Settings,
     backup: Backup,
     filestore: Filestore,
+    datastore: Datastore,
 }
 
 /// Backup-related settings.
@@ -27,6 +28,11 @@ pub struct Backup {
 
 /// Filestore-related settings.
 pub struct Filestore {
+    db: PathBuf,
+}
+
+/// Datastore-related settings.
+pub struct Datastore {
     db: PathBuf,
 }
 
@@ -50,6 +56,10 @@ impl Settings {
     pub fn filestore(&self) -> &Filestore {
         &self.filestore
     }
+
+    pub fn datastore(&self) -> &Datastore {
+        &self.datastore
+    }
 }
 
 impl Backup {
@@ -64,6 +74,12 @@ impl Backup {
 }
 
 impl Filestore {
+    pub fn db(&self) -> &Path {
+        &self.db
+    }
+}
+
+impl Datastore {
     pub fn db(&self) -> &Path {
         &self.db
     }
@@ -136,6 +152,9 @@ impl Builder {
             filestore: wire::Filestore {
                 db: "filestore".into(),
             },
+            datastore: wire::Datastore {
+                db: "datastore".into(),
+            },
         };
         settings::save(&settings, NAME, anchor)?;
         Ok(())
@@ -174,6 +193,7 @@ mod wire {
         pub process: process::wire::Settings,
         pub backup: Backup,
         pub filestore: Filestore,
+        pub datastore: Datastore,
     }
 
     /// Settings related to data backup.
@@ -185,6 +205,11 @@ mod wire {
 
     #[derive(Debug, Deserialize, Serialize)]
     pub struct Filestore {
+        pub db: settings::ConfigPath,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Datastore {
         pub db: settings::ConfigPath,
     }
 }
@@ -199,6 +224,7 @@ impl settings::Anchored for Settings {
             process: process::Settings::anchor(&wire.process, anchor)?,
             backup: Backup::anchor(&wire.backup, anchor)?,
             filestore: Filestore::anchor(&wire.filestore, anchor)?,
+            datastore: Datastore::anchor(&wire.datastore, anchor)?,
         })
     }
 }
@@ -219,6 +245,16 @@ impl settings::Anchored for Filestore {
 
     fn anchor(wire: &Self::Wire, anchor: &settings::Anchor) -> anyhow::Result<Self> {
         Ok(Filestore {
+            db: wire.db.path(anchor),
+        })
+    }
+}
+
+impl settings::Anchored for Datastore {
+    type Wire = wire::Datastore;
+
+    fn anchor(wire: &Self::Wire, anchor: &settings::Anchor) -> anyhow::Result<Self> {
+        Ok(Datastore {
             db: wire.db.path(anchor),
         })
     }

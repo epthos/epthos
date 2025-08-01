@@ -1,5 +1,5 @@
 use self::{builder::Builder, peer::Peer};
-use crate::filemanager;
+use crate::{datamanager, filemanager};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -11,6 +11,7 @@ pub struct Server<P: Peer> {
     roots: Vec<PathBuf>,
     _peer: P,
     manager: filemanager::FileManager,
+    datamanager: datamanager::Datamanager,
 }
 
 pub fn builder() -> Builder {

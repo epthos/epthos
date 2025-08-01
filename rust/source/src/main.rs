@@ -3,6 +3,8 @@ use anyhow::{Context, Result};
 use std::{path::Path, sync::Arc};
 
 mod clock;
+mod datamanager;
+mod datastore;
 mod disk;
 mod filemanager;
 mod filestore;
@@ -30,17 +32,19 @@ async fn main() -> Result<()> {
         .or_else(|_| new_source(settings.backup().keyfile(), rnd.as_ref()))?;
     let source_key = crypto::Keys::new(durable);
 
-    let store_local = tokio::task::LocalSet::new();
+    let fm_local = tokio::task::LocalSet::new();
+    let dm_local = tokio::task::LocalSet::new();
     let server = server::builder()
         .settings(&settings)
         .crypto(rnd, source_key)
-        .build(&store_local)
+        .build(&fm_local, &dm_local)
         .await
         .context("Failed to configure the Source")?;
     // TODO: this runs both futures in the same task, which may lead to poor parallelism if we don't
     // spawn where needed.
-    let (store_result, server_result) = tokio::join!(store_local, server.serve());
+    let (fm_result, dm_result, server_result) = tokio::join!(fm_local, dm_local, server.serve());
     tracing::info!("Server completed: {:?}", server_result);
-    tracing::info!("Store completed: {:?}", store_result);
+    tracing::info!("Filemanager LocalSet completed: {:?}", fm_result);
+    tracing::info!("Datamanager LocalSet completed: {:?}", dm_result);
     Ok(())
 }
