@@ -14,7 +14,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 use test_log::test;
-use tokio::{sync::oneshot, task::LocalSet};
+use tokio::sync::oneshot;
 
 // Have one file dirty, with next set at +5.
 // Send a metadata update within that time, with
@@ -24,74 +24,55 @@ use tokio::{sync::oneshot, task::LocalSet};
 
 #[test(tokio::test)]
 async fn wait_for_tree_scan() -> anyhow::Result<()> {
-    let local = LocalSet::new();
-    let local_ref = &local;
-    local
-        .run_until(async move {
-            let (manager, _store, clock, _tx) =
-                test_manager(local_ref, WatcherState::default(), StoreState::default());
+    let (manager, _store, clock, _tx) =
+        test_manager(WatcherState::default(), StoreState::default());
 
-            // Not a very deep test: we just confirm that when there is nothing
-            // to scan, we wait until the next round.
-            let (delay, _waker) = clock.wait("tree_scan").await;
-            assert_eq!(delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
-            manager.shutdown().await?;
+    // Not a very deep test: we just confirm that when there is nothing
+    // to scan, we wait until the next round.
+    let (delay, _waker) = clock.wait("tree_scan").await;
+    assert_eq!(delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
+    manager.shutdown().await?;
 
-            Ok(())
-        })
-        .await
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn detect_rescans_needed() -> anyhow::Result<()> {
-    let local = LocalSet::new();
-    let local_ref = &local;
-    local
-        .run_until(async move {
-            let mut store = StoreState::default();
-            // Convince the manager to avoid running a scan right away after
-            // the first one.
-            store.next_scan = t(10);
+    let mut store = StoreState::default();
+    // Convince the manager to avoid running a scan right away after
+    // the first one.
+    store.next_scan = t(10);
 
-            let (manager, store_state, _clock, _tx) =
-                test_manager(local_ref, WatcherState::default(), store);
+    let (manager, store_state, _clock, _tx) = test_manager(WatcherState::default(), store);
 
-            manager.set_roots(vec![Path::new("/a").into()]).await?;
-            let sc1 = store_state.lock().unwrap().scan_round;
+    manager.set_roots(vec![Path::new("/a").into()]).await?;
+    let sc1 = store_state.lock().unwrap().scan_round;
 
-            manager.set_roots(vec![Path::new("/a").into()]).await?;
-            let sc2 = store_state.lock().unwrap().scan_round;
+    manager.set_roots(vec![Path::new("/a").into()]).await?;
+    let sc2 = store_state.lock().unwrap().scan_round;
 
-            manager.set_roots(vec![Path::new("/b").into()]).await?;
-            let sc3 = store_state.lock().unwrap().scan_round;
+    manager.set_roots(vec![Path::new("/b").into()]).await?;
+    let sc3 = store_state.lock().unwrap().scan_round;
 
-            assert_eq!(sc1, sc2); // no new scan
-            assert_ne!(sc2, sc3); // new root -> new scan.
+    assert_eq!(sc1, sc2); // no new scan
+    assert_ne!(sc2, sc3); // new root -> new scan.
 
-            manager.shutdown().await?;
-            Ok(())
-        })
-        .await
+    manager.shutdown().await?;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn set_roots() -> anyhow::Result<()> {
-    let local = LocalSet::new();
-    let local_ref = &local;
-    local
-        .run_until(async move {
-            let (manager, store_state, _clock, _tx) =
-                test_manager(local_ref, WatcherState::default(), StoreState::default());
+    let (manager, store_state, _clock, _tx) =
+        test_manager(WatcherState::default(), StoreState::default());
 
-            manager.set_roots(vec![Path::new("/a").into()]).await?;
-            manager.shutdown().await?;
+    manager.set_roots(vec![Path::new("/a").into()]).await?;
+    manager.shutdown().await?;
 
-            let inner = store_state.lock().unwrap();
-            assert_eq!(inner.roots, vec![Path::new("/a")]);
+    let inner = store_state.lock().unwrap();
+    assert_eq!(inner.roots, vec![Path::new("/a")]);
 
-            Ok(())
-        })
-        .await
+    Ok(())
 }
 
 // ---------------------- helpers -----------------------
@@ -230,7 +211,6 @@ impl Future for FakeSleep {
 /// Creates a test manager with fake watcher and store states that can be
 /// controlled by the test.
 fn test_manager(
-    store_local: &LocalSet,
     watcher_state: WatcherState,
     store_state: StoreState,
 ) -> (
@@ -245,12 +225,12 @@ fn test_manager(
     let (tx, rx) = mpsc::channel(1);
 
     let manager = FileManager::new(
-        store_local,
         FakeStore::new(store_state.clone()),
         FakeDisk::new(),
         clock,
         Box::new(FakeWatcher::new(watcher_state.clone(), rx)),
-    );
+    )
+    .unwrap();
 
     (manager, store_state, clock_state, tx)
 }

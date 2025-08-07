@@ -5,6 +5,7 @@ use crate::{
     clock::{self, Clock},
     disk::{self, Disk},
     filestore::{self, Connection, Filestore, HashUpdate, Next, Scanner, Timing},
+    solo::{self, Solo},
     watcher,
 };
 use anyhow::Context;
@@ -15,7 +16,7 @@ use std::{
 };
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
-    task::{JoinHandle, LocalSet},
+    task::JoinHandle,
 };
 
 #[cfg(test)]
@@ -30,47 +31,29 @@ pub struct FileManager {
 /// Create a production Manager, using the production store, and
 /// doing full scans at the specified period. The store is single-threaded
 /// and will execute in the context of store_local.
-pub fn new(
-    store_local: &LocalSet,
-    db: &Path,
-    rand: crypto::SharedRandom,
-) -> anyhow::Result<FileManager> {
+pub fn new(db: &Path, rand: crypto::SharedRandom) -> anyhow::Result<FileManager> {
     let store = Connection::new(db, rand, Timing::default())?;
     let disk = disk::new()?;
     let clock = clock::new();
 
-    Ok(FileManager::new(
-        store_local,
-        store,
-        disk,
-        clock,
-        watcher::new()?,
-    ))
+    FileManager::new(store, disk, clock, watcher::new()?)
 }
 
 impl FileManager {
-    fn new<S: Filestore + 'static, D: Disk + 'static, C: Clock + 'static>(
-        store_local: &LocalSet,
+    fn new<S: Filestore + Send + 'static, D: Disk + Send + 'static, C: Clock + Send + 'static>(
         store: S,
         disk: D,
         clock: C,
         watcher: Box<dyn watcher::Watcher + Send>,
-    ) -> FileManager {
-        let (tx, rx) = mpsc::channel::<Operation>(1);
-        let mut runner = Runner {
+    ) -> anyhow::Result<FileManager> {
+        let f = move || Runner {
             store,
             disk,
             clock,
             watcher,
         };
-        let handle = store_local.spawn_local(async move {
-            let result = runner.run(rx).await;
-            if let Err(err) = &result {
-                tracing::error!("FileManager's Runner failed: {:?}", err);
-            }
-            result
-        });
-        FileManager { tx, handle }
+        let (tx, handle) = solo::start(f, "FileManager")?;
+        Ok(FileManager { tx, handle })
     }
 
     /// Shutdown can be called in parallel with any pending call and will interrupt them,
@@ -128,10 +111,10 @@ fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
 
 // The agent side of the manager. Holds the mutable store and watcher, and
 // performs the dispatching logic.
-impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
-    async fn run(&mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
-        tracing::info!("FileManager starting");
+impl<S: Filestore, D: Disk, C: Clock> Solo for Runner<S, D, C> {
+    type Operation = Operation;
 
+    async fn run(&mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
         // TODO: ensure those backups are known to the backup layer.
         let _ = self.store.backup_pending()?;
 
@@ -255,7 +238,9 @@ impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
         }
         Ok(())
     }
+}
 
+impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
     fn set_roots(&mut self, roots: &[&Path]) -> anyhow::Result<()> {
         self.watcher.set_roots(roots)?;
         let changed = self.store.set_roots(roots)?;

@@ -8,7 +8,6 @@ use settings::connection;
 use source_settings::Settings;
 use std::path::{Path, PathBuf};
 use storage::fingerprint;
-use tokio::task::LocalSet;
 
 #[derive(Default)]
 pub struct Builder {
@@ -75,25 +74,23 @@ impl Builder {
         self
     }
 
-    pub async fn build(
-        self,
-        fm_local: &LocalSet,
-        dm_local: &LocalSet,
-    ) -> Result<Server<peer::PeerImpl>, BuilderError> {
+    pub async fn build(self) -> Result<Server<peer::PeerImpl>, BuilderError> {
         let connection = self.connection.ok_or(BuilderError::MissingConnection)?;
         let broker_info = self.broker.ok_or(BuilderError::MissingBrokerInfo)?;
         let broker = broker_client::new(&connection, &broker_info).await?;
         let peer = peer::new(broker, connection);
         let rnd = self.rnd.ok_or(BuilderError::MissingCrypto)?;
         let _source_key = self.source_key.ok_or(BuilderError::MissingCrypto)?;
-
+        // TODO: this is where we should create the new threads. They will wait
+        // for the localset to complete (using rt.block_on()?) and communicate the
+        // status back somehow.
         Ok(Server {
             roots: self.roots,
             _peer: peer,
-            manager: filemanager::new(fm_local, &self.filestore, rnd)
-                .context("Failed to open DB")?,
-            datamanager: datamanager::new(dm_local, &self.datastore)
-                .context("failed to create Datamanager")?,
+            manager: filemanager::new(&self.filestore, rnd)
+                .context("Failed to create FileManager")?,
+            datamanager: datamanager::new(&self.datastore)
+                .context("failed to create DataManager")?,
         })
     }
 }

@@ -1,37 +1,37 @@
-//! The datamanager performs backup creation.
+//! The DataManager performs backup creation.
 
 use std::path::Path;
 
 use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
-    task::{JoinHandle, LocalSet},
+    sync::mpsc::{Receiver, Sender},
+    task::JoinHandle,
 };
 
-use crate::datastore::Datastore;
+use crate::{
+    datastore::Datastore,
+    solo::{self, Solo},
+};
 
-pub struct Datamanager {
+pub struct DataManager {
     tx: Sender<Operation>,
     handle: JoinHandle<anyhow::Result<()>>,
 }
 
 enum Operation {}
 
-pub fn new(local: &LocalSet, db: &Path) -> anyhow::Result<Datamanager> {
-    Ok(Datamanager::new(local, Datastore::new(db)?))
+pub fn new(db: &Path) -> anyhow::Result<DataManager> {
+    DataManager::new(Datastore::new(db)?)
 }
 
-impl Datamanager {
-    fn new(local: &LocalSet, store: Datastore) -> Datamanager {
-        let (tx, rx) = mpsc::channel::<Operation>(1);
-        let mut runner = Runner { store };
-        let handle = local.spawn_local(async move {
-            let result = runner.run(rx).await;
-            if let Err(err) = &result {
-                tracing::error!("Datamanager's runner failed: {:?}", err)
-            }
-            result
-        });
-        Datamanager { tx, handle }
+impl DataManager {
+    fn new(store: Datastore) -> anyhow::Result<DataManager> {
+        let f = move || Runner { store };
+        let (tx, handle) = solo::start(f, "DataManager")?;
+        Ok(DataManager { tx, handle })
+    }
+
+    pub fn monitor(&mut self) -> &mut JoinHandle<anyhow::Result<()>> {
+        &mut self.handle
     }
 }
 
@@ -39,9 +39,9 @@ struct Runner {
     store: Datastore,
 }
 
-impl Runner {
+impl Solo for Runner {
+    type Operation = Operation;
     async fn run(&mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
-        tracing::info!("Datamanager is starting");
         loop {
             tokio::select! {
                 op = rx.recv() => {
@@ -51,7 +51,6 @@ impl Runner {
                 }
             }
         }
-        tracing::info!("Datamanager is shutting down");
         Ok(())
     }
 }
