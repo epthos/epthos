@@ -1,20 +1,18 @@
 use super::*;
 use crate::{
     disk::ScanEntry,
+    fake_clock::FakeClockHandler,
     filestore::{self, HashUpdate, Next},
     model::{FileSize, ModificationTime},
 };
 use crypto::model::EncryptionGroup;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     path::PathBuf,
-    pin::Pin,
-    sync::{Arc, Mutex, MutexGuard, Weak},
-    task::{Context, Poll, Waker},
+    sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
 use test_log::test;
-use tokio::sync::oneshot;
 
 // Have one file dirty, with next set at +5.
 // Send a metadata update within that time, with
@@ -29,8 +27,8 @@ async fn wait_for_tree_scan() -> anyhow::Result<()> {
 
     // Not a very deep test: we just confirm that when there is nothing
     // to scan, we wait until the next round.
-    let (delay, _waker) = clock.wait("tree_scan").await;
-    assert_eq!(delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
+    let handle = clock.wait("tree_scan").await;
+    assert_eq!(handle.delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
     manager.shutdown().await?;
 
     Ok(())
@@ -43,15 +41,18 @@ async fn detect_rescans_needed() -> anyhow::Result<()> {
     // the first one.
     store.next_scan = t(10);
 
-    let (manager, store_state, _clock, _tx) = test_manager(WatcherState::default(), store);
+    let (manager, store_state, clock, _tx) = test_manager(WatcherState::default(), store);
 
     manager.set_roots(vec![Path::new("/a").into()]).await?;
+    clock.wait("tree_scan").await;
     let sc1 = store_state.lock().unwrap().scan_round;
 
     manager.set_roots(vec![Path::new("/a").into()]).await?;
+    clock.wait("tree_scan").await;
     let sc2 = store_state.lock().unwrap().scan_round;
 
     manager.set_roots(vec![Path::new("/b").into()]).await?;
+    clock.wait("tree_scan").await;
     let sc3 = store_state.lock().unwrap().scan_round;
 
     assert_eq!(sc1, sc2); // no new scan
@@ -76,137 +77,6 @@ async fn set_roots() -> anyhow::Result<()> {
 }
 
 // ---------------------- helpers -----------------------
-
-struct FakeClock {
-    inner: Arc<Mutex<InnerFakeClock>>,
-}
-
-struct FakeClockHandler {
-    inner: Arc<Mutex<InnerFakeClock>>,
-}
-
-impl FakeClockHandler {
-    fn new() -> (FakeClock, FakeClockHandler) {
-        let inner = Arc::new(Mutex::new(InnerFakeClock {
-            now: UNIX_EPOCH,
-            pending: HashMap::new(),
-            expected: HashMap::new(),
-        }));
-        (
-            FakeClock {
-                inner: inner.clone(),
-            },
-            FakeClockHandler { inner },
-        )
-    }
-
-    #[allow(dead_code)] // TODO: use it!
-    fn set_now(&self, now: SystemTime) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.now = now;
-    }
-
-    async fn wait(&self, id: &str) -> (Duration, Waker) {
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut inner = self.inner.lock().unwrap();
-            // Either the sleep was already initiated...
-            let early_result = get_pending_future(&mut inner, id);
-            if let Some((delay, waker)) = early_result {
-                tracing::debug!("sleep({}) was pending already", id);
-                return (delay, waker);
-            }
-            // ... or we can put a oneshot with the lock held, so it's
-            // already present when it arrives.
-            inner.expected.insert(id.to_owned(), tx);
-        }
-        tracing::debug!("waiting for sleep({})", id);
-        rx.await.unwrap();
-        // Now we should have received the result when we lock again.
-        let mut inner = self.inner.lock().unwrap();
-        get_pending_future(&mut inner, id).unwrap()
-    }
-}
-
-fn get_pending_future(
-    inner: &mut MutexGuard<'_, InnerFakeClock>,
-    id: &str,
-) -> Option<(Duration, Waker)> {
-    if let Some(weak) = inner.pending.get_mut(id) {
-        let Some(mu) = weak.upgrade() else {
-            return None;
-        };
-        let mut v = mu.lock().unwrap();
-        let waker = v.waker.take();
-        return Some((v.delay, waker.unwrap()));
-    }
-    None
-}
-
-struct InnerFakeClock {
-    now: SystemTime,
-    pending: HashMap<String, Weak<Mutex<InnerFakeSleep>>>,
-    expected: HashMap<String, oneshot::Sender<()>>,
-}
-
-impl InnerFakeClock {
-    fn register(&mut self, id: String, sleep: Weak<Mutex<InnerFakeSleep>>) {
-        if let Some(expected) = self.expected.remove(&id) {
-            expected.send(()).expect("failed to send");
-        }
-        self.pending.insert(id, sleep);
-    }
-}
-
-impl Clock for FakeClock {
-    fn now(&self) -> SystemTime {
-        let inner = self.inner.lock().unwrap();
-        inner.now
-    }
-
-    fn sleep(&self, delay: Duration, id: &str) -> impl Future<Output = ()> + '_ {
-        let inner = InnerFakeSleep {
-            delay,
-            id: id.to_owned(),
-            waker: None,
-            parent: Arc::downgrade(&self.inner),
-        };
-        FakeSleep {
-            inner: Arc::new(Mutex::new(inner)),
-        }
-    }
-}
-
-struct FakeSleep {
-    inner: Arc<Mutex<InnerFakeSleep>>,
-}
-
-struct InnerFakeSleep {
-    delay: Duration,
-    id: String,
-    waker: Option<Waker>,
-    parent: Weak<Mutex<InnerFakeClock>>,
-}
-
-impl Future for FakeSleep {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.parent.upgrade() {
-            Some(lock) => {
-                inner.waker = Some(cx.waker().clone());
-                let mut clock = lock.lock().unwrap();
-                clock.register(inner.id.clone(), Arc::downgrade(&self.inner));
-
-                Poll::Pending
-            }
-            // If there is nobody to wake this up, we have no other option than
-            // completing right away.
-            None => Poll::Ready(()),
-        }
-    }
-}
 
 /// Creates a test manager with fake watcher and store states that can be
 /// controlled by the test.

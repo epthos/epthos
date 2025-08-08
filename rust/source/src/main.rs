@@ -13,6 +13,9 @@ mod server;
 mod solo;
 mod watcher;
 
+#[cfg(test)]
+mod fake_clock;
+
 // Creates a new Source key and saves it to the specified path.
 fn new_source(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::key::Durable> {
     let durable = rnd.generate_root_key()?;
