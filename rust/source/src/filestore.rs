@@ -647,7 +647,7 @@ fn initialize(
 
     Connection::migrations()
         .to_latest(&mut con)
-        .context("Failed to migrate database")?;
+        .context("Failed to migrate Filestore database")?;
     Ok(Connection {
         conn: con,
         rand,

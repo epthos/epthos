@@ -90,6 +90,7 @@ impl Builder {
             manager: filemanager::new(&self.filestore, rnd)
                 .context("Failed to create FileManager")?,
             datamanager: datamanager::new(&self.datastore)
+                .await
                 .context("failed to create DataManager")?,
         })
     }
