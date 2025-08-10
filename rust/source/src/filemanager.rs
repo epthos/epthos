@@ -10,13 +10,19 @@ use crate::{
     watcher,
 };
 use anyhow::{Context, bail};
+use futures::FutureExt;
 use std::{
     cmp::min,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    task::Poll,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        oneshot,
+    },
     task::JoinHandle,
 };
 
@@ -137,7 +143,8 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
         let _ = self.store.backup_pending()?;
 
         let mut scan_delay: Option<SystemTime> = None;
-        let mut slots: Vec<DM::Slot> = vec![];
+        let mut backup_slot: Option<DM::Slot> = None;
+        let pending_backups = VecFutures::new();
         // The work loop will continuously refresh the filesystem when a scan is
         // active, hash files that haven't changed in a while, and otherwise respond
         // to client requests.
@@ -163,12 +170,14 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             }
             let mut backup_delay: Option<SystemTime> = None;
             // No need to look up backups that need to be done if there is no open slot.
-            // TODO: this changes how we should wait.
-            if !slots.is_empty() {
+            if backup_slot.is_some() {
                 match self.store.backup_next(now)? {
                     Next::Next(path, _egroup) => {
-                        let slot = slots.pop().unwrap();
-                        slot.enqueue(path.clone()).await?;
+                        let slot = backup_slot.take().unwrap();
+                        // We enqueue first, so that if there is a crash we can use _running_ backups to
+                        // fill in the list of _started_ backups, without waiting for the backup queue.
+                        let rx = slot.enqueue(path.clone()).await?;
+                        pending_backups.add(rx);
                         self.store.backup_start(path)?;
                     }
                     Next::Done(delay) => {
@@ -209,7 +218,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             // Any delay set as None indicates that we could process the underlying work
             // right away. This is a bit more complex for backups, as we also need to know
             // that the datamanager has the capacity to accept a new backup.
-            let can_backup = !slots.is_empty() && backup_delay.is_none();
+            let can_backup = backup_slot.is_some() && backup_delay.is_none();
             let more_pending = [&scan_delay, &hash_delay].iter().any(|d| d.is_none()) || can_backup;
             if !more_pending && next_event.is_valid() {
                 tracing::info!(
@@ -242,16 +251,20 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         }
                     }
                 }
-                slot = self.datamanager.backup_slots().recv() => {
+                slot = self.datamanager.backup_slots().recv(), if backup_slot.is_none() => {
                     match slot {
                         Some(slot) => {
-                            slots.push(slot);
+                            backup_slot = Some(slot);
                         },
                         None => {
                            bail!("DataManager failed");
                         },
                     };
                 },
+                done = pending_backups.next() => {
+                    tracing::info!("backup completed: {:?}", &done);
+                    self.store.backup_done(done.path, self.clock.now(), done.update)?;
+                }
                 update = self.watcher.next().recv() => {
                     tracing::debug!("handling watcher operation {:?}", &update);
                     match update {
@@ -373,5 +386,144 @@ mod earliest_event_test {
         let t15 = UNIX_EPOCH + Duration::from_secs(15);
         earliest = min(earliest, EarliestEvent::new(t15, "15s"));
         assert_eq!(earliest.time, t5);
+    }
+}
+
+// Helper to manage a vector of oneshot results.
+
+struct VecFutures<O> {
+    pending: Arc<Mutex<Vec<oneshot::Receiver<O>>>>,
+}
+
+impl<O> VecFutures<O> {
+    pub fn new() -> Self {
+        VecFutures {
+            pending: Arc::new(Mutex::new(vec![])),
+        }
+    }
+    pub fn add(&self, o: oneshot::Receiver<O>) {
+        let mut v = self.pending.lock().unwrap();
+        v.push(o);
+    }
+    pub fn next(&self) -> VecFuture<O> {
+        VecFuture {
+            pending: self.pending.clone(),
+        }
+    }
+}
+
+struct VecFuture<O> {
+    pending: Arc<Mutex<Vec<oneshot::Receiver<O>>>>,
+}
+
+impl<O> Future for VecFuture<O> {
+    type Output = O;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let mut v = self.pending.lock().unwrap();
+        let item = v
+            .iter_mut()
+            .enumerate()
+            // TODO: implement poll_unpin if nothing else from futures is used.
+            .find_map(|(i, f)| match f.poll_unpin(cx) {
+                Poll::Ready(e) => Some((i, e)),
+                Poll::Pending => None,
+            });
+        match item {
+            Some((i, e)) => {
+                // We consumed the receiver, we must drop it from the vec to avoid
+                // waiting for it once more, whether it succeeded or not.
+                v.remove(i);
+                match e {
+                    Ok(e) => Poll::Ready(e),
+                    Err(_) => Poll::Pending,
+                }
+            }
+            None => Poll::Pending,
+        }
+    }
+}
+
+#[cfg(test)]
+mod vec_futures {
+    use crate::filemanager::VecFutures;
+    use anyhow::bail;
+    use rand::{TryRngCore, rngs::OsRng};
+    use std::{collections::HashSet, time::Duration};
+    use tokio::sync::{
+        mpsc,
+        oneshot::{self, Receiver},
+    };
+
+    #[tokio::test]
+    async fn empty_vec() -> anyhow::Result<()> {
+        let v: VecFutures<()> = VecFutures::new();
+        let delay = tokio::time::sleep(Duration::from_millis(1));
+        let mut c = 0;
+        loop {
+            c += 1;
+            tokio::select! {
+                _ = v.next() => {
+                    bail!("should not select");
+                },
+                _ = delay => break,
+            }
+        }
+        assert_eq!(c, 1);
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn mix_add_and_trigger() -> anyhow::Result<()> {
+        let v: VecFutures<i32> = VecFutures::new();
+        let mut got: HashSet<i32> = HashSet::new();
+        let (tx, mut rx) = mpsc::channel::<Receiver<i32>>(1);
+        let total = 10;
+        let h = tokio::task::spawn(async move {
+            let mut current = 0;
+            let mut pending = vec![];
+            loop {
+                let can_add = current < total && OsRng.try_next_u32().unwrap() % 2 == 0;
+                if can_add {
+                    tracing::info!("sending item {}", current);
+                    let (otx, orx) = oneshot::channel();
+                    tx.send(orx).await.unwrap();
+                    pending.push((otx, current));
+                    current += 1;
+                } else {
+                    if pending.is_empty() {
+                        if current >= total {
+                            break;
+                        }
+                        continue;
+                    }
+                    let idx = OsRng.try_next_u32().unwrap() as usize % pending.len();
+                    let (otx, value) = pending.remove(idx);
+                    tracing::info!("finishing item {}", value);
+                    otx.send(value).unwrap();
+                }
+            }
+        });
+        loop {
+            tokio::select! {
+                c = v.next() => {
+                    tracing::info!("received finished item {}", c);
+                    got.insert(c);
+                },
+                Some(r) = rx.recv() => {
+                    tracing::info!("adding pending item");
+                    v.add(r);
+                }
+            }
+            if got.len() >= total as usize {
+                break;
+            }
+        }
+        h.await?;
+        assert_eq!(got, HashSet::from_iter(0..10));
+        Ok(())
     }
 }

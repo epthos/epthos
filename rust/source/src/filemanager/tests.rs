@@ -1,8 +1,9 @@
 use super::*;
 use crate::{
-    datamanager::BackupSlot,
+    datamanager::{BackupResult, BackupSlot},
     disk::ScanEntry,
     fake_clock::FakeClockHandler,
+    fake_disk::FakeDisk,
     filestore::{self, HashUpdate, Next},
     model::{FileSize, ModificationTime},
 };
@@ -131,7 +132,7 @@ impl DataManager for FakeDataManager {
 }
 
 impl BackupSlot for FakeSlot {
-    async fn enqueue(self, _path: PathBuf) -> anyhow::Result<()> {
+    async fn enqueue(self, _path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>> {
         todo!()
     }
 }
@@ -157,28 +158,6 @@ impl Default for StoreState {
             next_scan: SystemTime::UNIX_EPOCH,
             scan_round: 0,
         }
-    }
-}
-
-struct FakeDisk {}
-
-impl FakeDisk {
-    fn new() -> FakeDisk {
-        FakeDisk {}
-    }
-}
-
-impl Disk for FakeDisk {
-    fn scan(&self, _path: &Path) -> anyhow::Result<disk::ScanIterator> {
-        todo!()
-    }
-
-    fn metadata(&self, _path: &Path) -> anyhow::Result<(FileSize, ModificationTime)> {
-        todo!()
-    }
-
-    fn snapshot(&self, _path: &Path) -> std::io::Result<disk::Snapshot> {
-        todo!()
     }
 }
 

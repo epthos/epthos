@@ -15,6 +15,8 @@ mod watcher;
 
 #[cfg(test)]
 mod fake_clock;
+#[cfg(test)]
+mod fake_disk;
 
 // Creates a new Source key and saves it to the specified path.
 fn new_source(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::key::Durable> {

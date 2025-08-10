@@ -7,14 +7,14 @@ use anyhow::Context;
 use rusqlite_migration::{M, Migrations};
 
 pub struct Datastore {
-    conn: rusqlite::Connection,
+    _conn: rusqlite::Connection,
 }
 
 impl Datastore {
     pub fn new(db: &Path) -> anyhow::Result<Datastore> {
         let mut conn = rusqlite::Connection::open(db).context("Failed to open db")?;
         initialize(&mut conn)?;
-        Ok(Datastore { conn })
+        Ok(Datastore { _conn: conn })
     }
 
     #[cfg(test)]
@@ -22,7 +22,7 @@ impl Datastore {
         let mut conn =
             rusqlite::Connection::open_in_memory().context("Failed to open in-memory db")?;
         initialize(&mut conn)?;
-        Ok(Datastore { conn })
+        Ok(Datastore { _conn: conn })
     }
 
     fn migrations() -> Migrations<'static> {

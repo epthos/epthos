@@ -3,15 +3,21 @@
 use crate::{
     clock::{self, Clock},
     datastore::Datastore,
+    disk::{self, Disk},
+    filestore::HashUpdate,
     solo::{self, Solo},
 };
 use anyhow::{Context, bail};
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        oneshot,
+    },
     task::JoinHandle,
 };
 
@@ -25,12 +31,19 @@ pub trait DataManager {
 }
 
 pub trait BackupSlot {
-    async fn enqueue(self, path: PathBuf) -> anyhow::Result<()>;
+    async fn enqueue(self, path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>>;
+}
+
+#[derive(Debug)]
+pub struct BackupResult {
+    pub path: PathBuf,
+    pub update: HashUpdate,
 }
 
 pub async fn new(db: &Path) -> anyhow::Result<DataManagerImpl> {
     let clock = clock::new();
-    DataManagerImpl::new(Datastore::new(db)?, clock).await
+    let disk = disk::new()?;
+    DataManagerImpl::new(Datastore::new(db)?, clock, disk).await
 }
 
 pub struct DataManagerImpl {
@@ -40,13 +53,15 @@ pub struct DataManagerImpl {
 }
 
 impl DataManagerImpl {
-    async fn new<C>(store: Datastore, clock: C) -> anyhow::Result<DataManagerImpl>
+    async fn new<C, D>(store: Datastore, clock: C, disk: D) -> anyhow::Result<DataManagerImpl>
     where
         C: Clock + Send + 'static,
+        D: Disk + Send + 'static,
     {
         let f = move || Runner {
             _store: store,
             clock,
+            disk,
         };
         let handle = solo::start(f, "DataManager")?;
         // Get ready to receive backup slots from the runner.
@@ -82,7 +97,7 @@ impl DataManager for DataManagerImpl {
 enum Op {
     // Initialize the Runner, which needs to know how to return backup slots.
     Init((Sender<BackupSlotImpl>, Sender<Op>)),
-    Enqueue(PathBuf),
+    Enqueue(PathBuf, oneshot::Sender<BackupResult>),
     // We can't rely on dropping the sender in the manager as we clone it in every
     // backup slot too.
     Shutdown,
@@ -93,24 +108,32 @@ pub struct BackupSlotImpl {
 }
 
 impl BackupSlot for BackupSlotImpl {
-    async fn enqueue(self, path: PathBuf) -> anyhow::Result<()> {
+    async fn enqueue(self, path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>> {
+        let (tx, rx) = oneshot::channel();
         self.tx
-            .send(Op::Enqueue(path))
+            .send(Op::Enqueue(path, tx))
             .await
             .context("Runner failed")?;
-        Ok(())
+        Ok(rx)
     }
 }
 
-struct Runner<C>
+struct Runner<C, D>
 where
     C: Clock,
+    D: Disk,
 {
     _store: Datastore,
     clock: C,
+    disk: D,
 }
 
-impl<C: Clock> Solo for Runner<C> {
+struct PendingBackup {
+    path: PathBuf,
+    tx: oneshot::Sender<BackupResult>,
+}
+
+impl<C: Clock, D: Disk> Solo for Runner<C, D> {
     type Operation = Op;
 
     async fn run(self, mut rx: Receiver<Op>) -> anyhow::Result<()> {
@@ -118,9 +141,13 @@ impl<C: Clock> Solo for Runner<C> {
             bail!("Initialization failed");
         };
         let mut remaining = 1;
-        let mut pending = 0;
+        let mut pending = VecDeque::new();
         loop {
-            tracing::debug!("starting with {} remaining, {} pending", remaining, pending);
+            tracing::debug!(
+                "starting with {} remaining, {} pending",
+                remaining,
+                pending.len()
+            );
             tokio::select! {
                 _ = slot_sender.send(BackupSlotImpl { tx: op_sender.clone() }), if remaining > 0 => {
                     tracing::debug!("sent one slot");
@@ -133,17 +160,24 @@ impl<C: Clock> Solo for Runner<C> {
                             // This only happens at startup!
                             bail!("Init received after start");
                         },
-                        Some(Op::Enqueue(path)) => {
+                        Some(Op::Enqueue(path, tx)) => {
                             tracing::debug!("Enqueuing backup for {:?}", &path);
                             // Enqueue the backup.
-                            pending += 1;
+                            pending.push_front(PendingBackup{path, tx});
                         },
                         None | Some(Op::Shutdown) => break,
                     }
                 }
-                _ = self.clock.sleep(Duration::from_secs(10), "pause"), if pending > 0 => {
+                _ = self.clock.sleep(Duration::from_secs(10), "pause"), if !pending.is_empty() => {
                     tracing::debug!("One backup completed");
-                    pending -= 1;
+                    let p = pending.pop_back().expect("checked above");
+                    let result = match self.disk.snapshot(&p.path) {
+                        Ok(snapshot) => HashUpdate::Hash(snapshot),
+                        Err(err) => HashUpdate::Unreadable(err),
+                    };
+                    if let Err(result) = p.tx.send(BackupResult{path: p.path, update: result}) {
+                        tracing::warn!("failed to send {:?}", result);
+                    }
                     remaining += 1;
                 }
             }
@@ -155,7 +189,10 @@ impl<C: Clock> Solo for Runner<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{datamanager::DataManagerImpl, datastore::Datastore, fake_clock::FakeClockHandler};
+    use crate::{
+        datamanager::DataManagerImpl, datastore::Datastore, fake_clock::FakeClockHandler,
+        fake_disk::FakeDisk,
+    };
     use anyhow::Context;
     use std::{path::PathBuf, time::Duration};
     use test_log::test;
@@ -165,7 +202,7 @@ mod tests {
     async fn smoke_test() -> anyhow::Result<()> {
         let ds = Datastore::new_in_memory()?;
         let (clock, clock_state) = FakeClockHandler::new();
-        let mut dm = DataManagerImpl::new(ds, clock).await?;
+        let mut dm = DataManagerImpl::new(ds, clock, FakeDisk::new()).await?;
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         slot.enqueue(PathBuf::from("/a")).await?;
