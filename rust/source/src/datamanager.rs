@@ -15,19 +15,32 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub struct DataManager {
-    tx: Sender<Operation>,
-    handle: JoinHandle<anyhow::Result<()>>,
-    slot_rx: Receiver<BackupSlot>,
+pub trait DataManager {
+    type Slot: BackupSlot;
+
+    /// Provides the receiver of new backup slots.
+    fn backup_slots(&mut self) -> &mut Receiver<Self::Slot>;
+    /// Shuts down the manager.
+    async fn shutdown(self) -> anyhow::Result<()>;
 }
 
-pub async fn new(db: &Path) -> anyhow::Result<DataManager> {
+pub trait BackupSlot {
+    async fn enqueue(self, path: PathBuf) -> anyhow::Result<()>;
+}
+
+pub async fn new(db: &Path) -> anyhow::Result<DataManagerImpl> {
     let clock = clock::new();
-    DataManager::new(Datastore::new(db)?, clock).await
+    DataManagerImpl::new(Datastore::new(db)?, clock).await
 }
 
-impl DataManager {
-    async fn new<C>(store: Datastore, clock: C) -> anyhow::Result<DataManager>
+pub struct DataManagerImpl {
+    tx: Sender<Op>,
+    handle: JoinHandle<anyhow::Result<()>>,
+    slot_rx: Receiver<BackupSlotImpl>,
+}
+
+impl DataManagerImpl {
+    async fn new<C>(store: Datastore, clock: C) -> anyhow::Result<DataManagerImpl>
     where
         C: Clock + Send + 'static,
     {
@@ -35,53 +48,54 @@ impl DataManager {
             _store: store,
             clock,
         };
-        let (tx, handle) = solo::start(f, "DataManager")?;
+        let handle = solo::start(f, "DataManager")?;
         // Get ready to receive backup slots from the runner.
         let (slot_tx, slot_rx) = mpsc::channel(1);
-        tx.send(Operation::Init((slot_tx, tx.clone())))
+        handle
+            .sender
+            .send(Op::Init((slot_tx, handle.sender.clone())))
             .await
             .context("Runner failed")?;
-        Ok(DataManager {
-            tx,
-            handle,
+        Ok(DataManagerImpl {
+            tx: handle.sender,
+            handle: handle.handle,
             slot_rx,
         })
     }
+}
 
-    pub fn monitor(&mut self) -> &mut JoinHandle<anyhow::Result<()>> {
-        &mut self.handle
-    }
+impl DataManager for DataManagerImpl {
+    type Slot = BackupSlotImpl;
 
-    pub fn backup_slots(&mut self) -> &mut Receiver<BackupSlot> {
+    fn backup_slots(&mut self) -> &mut Receiver<BackupSlotImpl> {
         &mut self.slot_rx
     }
 
-    #[allow(dead_code)]
-    pub async fn shutdown(self) -> anyhow::Result<()> {
-        let _ = self.tx.send(Operation::Shutdown).await;
+    async fn shutdown(self) -> anyhow::Result<()> {
+        let _ = self.tx.send(Op::Shutdown).await;
         self.handle.await??;
         Ok(())
     }
 }
 
 #[derive(Debug)]
-enum Operation {
+enum Op {
     // Initialize the Runner, which needs to know how to return backup slots.
-    Init((Sender<BackupSlot>, Sender<Operation>)),
+    Init((Sender<BackupSlotImpl>, Sender<Op>)),
     Enqueue(PathBuf),
     // We can't rely on dropping the sender in the manager as we clone it in every
     // backup slot too.
     Shutdown,
 }
 
-pub struct BackupSlot {
-    tx: Sender<Operation>,
+pub struct BackupSlotImpl {
+    tx: Sender<Op>,
 }
 
-impl BackupSlot {
-    pub async fn enqueue(self, path: PathBuf) -> anyhow::Result<()> {
+impl BackupSlot for BackupSlotImpl {
+    async fn enqueue(self, path: PathBuf) -> anyhow::Result<()> {
         self.tx
-            .send(Operation::Enqueue(path))
+            .send(Op::Enqueue(path))
             .await
             .context("Runner failed")?;
         Ok(())
@@ -97,9 +111,10 @@ where
 }
 
 impl<C: Clock> Solo for Runner<C> {
-    type Operation = Operation;
-    async fn run(&mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
-        let Some(Operation::Init((slot_sender, op_sender))) = rx.recv().await else {
+    type Operation = Op;
+
+    async fn run(self, mut rx: Receiver<Op>) -> anyhow::Result<()> {
+        let Some(Op::Init((slot_sender, op_sender))) = rx.recv().await else {
             bail!("Initialization failed");
         };
         let mut remaining = 1;
@@ -107,23 +122,23 @@ impl<C: Clock> Solo for Runner<C> {
         loop {
             tracing::debug!("starting with {} remaining, {} pending", remaining, pending);
             tokio::select! {
-                _ = slot_sender.send(BackupSlot { tx: op_sender.clone() }), if remaining > 0 => {
+                _ = slot_sender.send(BackupSlotImpl { tx: op_sender.clone() }), if remaining > 0 => {
                     tracing::debug!("sent one slot");
                     remaining -= 1;
                 }
                 op = rx.recv() => {
                     tracing::debug!("received Op={:?}", &op);
                     match op {
-                        Some(Operation::Init(_)) => {
+                        Some(Op::Init(_)) => {
                             // This only happens at startup!
                             bail!("Init received after start");
                         },
-                        Some(Operation::Enqueue(path)) => {
+                        Some(Op::Enqueue(path)) => {
                             tracing::debug!("Enqueuing backup for {:?}", &path);
                             // Enqueue the backup.
                             pending += 1;
                         },
-                        None | Some(Operation::Shutdown) => break,
+                        None | Some(Op::Shutdown) => break,
                     }
                 }
                 _ = self.clock.sleep(Duration::from_secs(10), "pause"), if pending > 0 => {
@@ -139,10 +154,10 @@ impl<C: Clock> Solo for Runner<C> {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
-
-    use crate::{datamanager::DataManager, datastore::Datastore, fake_clock::FakeClockHandler};
+    use super::*;
+    use crate::{datamanager::DataManagerImpl, datastore::Datastore, fake_clock::FakeClockHandler};
     use anyhow::Context;
+    use std::{path::PathBuf, time::Duration};
     use test_log::test;
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -150,7 +165,7 @@ mod tests {
     async fn smoke_test() -> anyhow::Result<()> {
         let ds = Datastore::new_in_memory()?;
         let (clock, clock_state) = FakeClockHandler::new();
-        let mut dm = DataManager::new(ds, clock).await?;
+        let mut dm = DataManagerImpl::new(ds, clock).await?;
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         slot.enqueue(PathBuf::from("/a")).await?;

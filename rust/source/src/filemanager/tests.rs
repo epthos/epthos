@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    datamanager::BackupSlot,
     disk::ScanEntry,
     fake_clock::FakeClockHandler,
     filestore::{self, HashUpdate, Next},
@@ -93,16 +94,46 @@ fn test_manager(
     let store_state = Arc::new(Mutex::new(store_state));
     let (clock, clock_state) = FakeClockHandler::new();
     let (tx, rx) = mpsc::channel(1);
+    let (backup_tx, backup_rx) = mpsc::channel(1);
 
     let manager = FileManager::new(
         FakeStore::new(store_state.clone()),
         FakeDisk::new(),
         clock,
         Box::new(FakeWatcher::new(watcher_state.clone(), rx)),
+        FakeDataManager {
+            _tx: backup_tx,
+            rx: backup_rx,
+        },
     )
     .unwrap();
 
     (manager, store_state, clock_state, tx)
+}
+
+struct FakeDataManager {
+    _tx: Sender<FakeSlot>,
+    rx: Receiver<FakeSlot>,
+}
+
+struct FakeSlot {}
+
+impl DataManager for FakeDataManager {
+    type Slot = FakeSlot;
+
+    fn backup_slots(&mut self) -> &mut Receiver<Self::Slot> {
+        &mut self.rx
+    }
+
+    async fn shutdown(self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl BackupSlot for FakeSlot {
+    async fn enqueue(self, _path: PathBuf) -> anyhow::Result<()> {
+        todo!()
+    }
 }
 
 #[derive(Default)]

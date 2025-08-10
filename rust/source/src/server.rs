@@ -1,5 +1,5 @@
 use self::{builder::Builder, peer::Peer};
-use crate::{datamanager, filemanager};
+use crate::filemanager;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -11,7 +11,6 @@ pub struct Server<P: Peer> {
     roots: Vec<PathBuf>,
     _peer: P,
     manager: filemanager::FileManager,
-    datamanager: datamanager::DataManager,
 }
 
 pub fn builder() -> Builder {
@@ -29,9 +28,6 @@ impl<P: Peer> Server<P> {
         tokio::select! {
             r = self.manager.monitor() => {
                 r.context("FileManager thread")?.context("FileManager status")?;
-            }
-            r = self.datamanager.monitor() => {
-                r.context("DataManager thread")?.context("DataManager status")?;
             }
         }
         self.manager.monitor().await??;

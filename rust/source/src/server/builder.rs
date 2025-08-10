@@ -87,11 +87,14 @@ impl Builder {
         Ok(Server {
             roots: self.roots,
             _peer: peer,
-            manager: filemanager::new(&self.filestore, rnd)
-                .context("Failed to create FileManager")?,
-            datamanager: datamanager::new(&self.datastore)
-                .await
-                .context("failed to create DataManager")?,
+            manager: filemanager::new(
+                &self.filestore,
+                rnd,
+                datamanager::new(&self.datastore)
+                    .await
+                    .context("failed to create DataManager")?,
+            )
+            .context("Failed to create FileManager")?,
         })
     }
 }

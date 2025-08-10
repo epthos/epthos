@@ -3,12 +3,13 @@
 
 use crate::{
     clock::{self, Clock},
+    datamanager::{BackupSlot, DataManager, DataManagerImpl},
     disk::{self, Disk},
     filestore::{self, Connection, Filestore, HashUpdate, Next, Scanner, Timing},
     solo::{self, Solo},
     watcher,
 };
-use anyhow::Context;
+use anyhow::{Context, bail};
 use std::{
     cmp::min,
     path::{Path, PathBuf},
@@ -31,29 +32,44 @@ pub struct FileManager {
 /// Create a production Manager, using the production store, and
 /// doing full scans at the specified period. The store is single-threaded
 /// and will execute in the context of store_local.
-pub fn new(db: &Path, rand: crypto::SharedRandom) -> anyhow::Result<FileManager> {
+pub fn new(
+    db: &Path,
+    rand: crypto::SharedRandom,
+    datamanager: DataManagerImpl,
+) -> anyhow::Result<FileManager> {
     let store = Connection::new(db, rand, Timing::default())?;
     let disk = disk::new()?;
     let clock = clock::new();
 
-    FileManager::new(store, disk, clock, watcher::new()?)
+    FileManager::new(store, disk, clock, watcher::new()?, datamanager)
 }
 
 impl FileManager {
-    fn new<S: Filestore + Send + 'static, D: Disk + Send + 'static, C: Clock + Send + 'static>(
+    fn new<S, D, C, DM>(
         store: S,
         disk: D,
         clock: C,
         watcher: Box<dyn watcher::Watcher + Send>,
-    ) -> anyhow::Result<FileManager> {
+        datamanager: DM,
+    ) -> anyhow::Result<FileManager>
+    where
+        S: Filestore + Send + 'static,
+        D: Disk + Send + 'static,
+        C: Clock + Send + 'static,
+        DM: DataManager + Send + 'static,
+    {
         let f = move || Runner {
             store,
             disk,
             clock,
             watcher,
+            datamanager,
         };
-        let (tx, handle) = solo::start(f, "FileManager")?;
-        Ok(FileManager { tx, handle })
+        let handle = solo::start(f, "FileManager")?;
+        Ok(FileManager {
+            tx: handle.sender,
+            handle: handle.handle,
+        })
     }
 
     /// Shutdown can be called in parallel with any pending call and will interrupt them,
@@ -85,16 +101,18 @@ enum Operation {
     SetRoots(Vec<PathBuf>, Sender<anyhow::Result<()>>),
 }
 
-struct Runner<S, D, C>
+struct Runner<S, D, C, DM>
 where
     S: Filestore,
     D: Disk,
     C: Clock,
+    DM: DataManager,
 {
     store: S,
     disk: D,
     clock: C,
     watcher: Box<dyn watcher::Watcher + Send>,
+    datamanager: DM,
 }
 
 fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
@@ -111,14 +129,15 @@ fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
 
 // The agent side of the manager. Holds the mutable store and watcher, and
 // performs the dispatching logic.
-impl<S: Filestore, D: Disk, C: Clock> Solo for Runner<S, D, C> {
+impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, DM> {
     type Operation = Operation;
 
-    async fn run(&mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
+    async fn run(mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
         // TODO: ensure those backups are known to the backup layer.
         let _ = self.store.backup_pending()?;
 
         let mut scan_delay: Option<SystemTime> = None;
+        let mut slots: Vec<DM::Slot> = vec![];
         // The work loop will continuously refresh the filesystem when a scan is
         // active, hash files that haven't changed in a while, and otherwise respond
         // to client requests.
@@ -143,14 +162,19 @@ impl<S: Filestore, D: Disk, C: Clock> Solo for Runner<S, D, C> {
                 }
             }
             let mut backup_delay: Option<SystemTime> = None;
-            match self.store.backup_next(now)? {
-                Next::Next(path, _egroup) => {
-                    // TODO: enqueue backup.
-                    self.store.backup_start(path)?;
-                }
-                Next::Done(delay) => {
-                    next_event = min(next_event, EarliestEvent::new(delay, "backup"));
-                    backup_delay = Some(delay);
+            // No need to look up backups that need to be done if there is no open slot.
+            // TODO: this changes how we should wait.
+            if !slots.is_empty() {
+                match self.store.backup_next(now)? {
+                    Next::Next(path, _egroup) => {
+                        let slot = slots.pop().unwrap();
+                        slot.enqueue(path.clone()).await?;
+                        self.store.backup_start(path)?;
+                    }
+                    Next::Done(delay) => {
+                        next_event = min(next_event, EarliestEvent::new(delay, "backup"));
+                        backup_delay = Some(delay);
+                    }
                 }
             }
             if scan_delay.is_none() {
@@ -183,10 +207,10 @@ impl<S: Filestore, D: Disk, C: Clock> Solo for Runner<S, D, C> {
             let hash_sleep = duration_or_zero(now, &hash_delay);
             let back_sleep = duration_or_zero(now, &backup_delay);
             // Any delay set as None indicates that we could process the underlying work
-            // right away.
-            let more_pending = [&scan_delay, &hash_delay, &backup_delay]
-                .iter()
-                .any(|d| d.is_none());
+            // right away. This is a bit more complex for backups, as we also need to know
+            // that the datamanager has the capacity to accept a new backup.
+            let can_backup = !slots.is_empty() && backup_delay.is_none();
+            let more_pending = [&scan_delay, &hash_delay].iter().any(|d| d.is_none()) || can_backup;
             if !more_pending && next_event.is_valid() {
                 tracing::info!(
                     "waiting for next {} at {}",
@@ -218,6 +242,16 @@ impl<S: Filestore, D: Disk, C: Clock> Solo for Runner<S, D, C> {
                         }
                     }
                 }
+                slot = self.datamanager.backup_slots().recv() => {
+                    match slot {
+                        Some(slot) => {
+                            slots.push(slot);
+                        },
+                        None => {
+                           bail!("DataManager failed");
+                        },
+                    };
+                },
                 update = self.watcher.next().recv() => {
                     tracing::debug!("handling watcher operation {:?}", &update);
                     match update {
@@ -236,11 +270,12 @@ impl<S: Filestore, D: Disk, C: Clock> Solo for Runner<S, D, C> {
                 }
             }
         }
+        self.datamanager.shutdown().await?;
         Ok(())
     }
 }
 
-impl<S: Filestore, D: Disk, C: Clock> Runner<S, D, C> {
+impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
     fn set_roots(&mut self, roots: &[&Path]) -> anyhow::Result<()> {
         self.watcher.set_roots(roots)?;
         let changed = self.store.set_roots(roots)?;

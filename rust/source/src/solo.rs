@@ -13,7 +13,12 @@ pub trait Solo {
 
     // Perform the work. When using start() below, this will be executed in a
     // single thread.
-    async fn run(&mut self, rx: Receiver<Self::Operation>) -> anyhow::Result<()>;
+    async fn run(self, rx: Receiver<Self::Operation>) -> anyhow::Result<()>;
+}
+
+pub struct Handle<O> {
+    pub sender: Sender<O>,
+    pub handle: JoinHandle<anyhow::Result<()>>,
 }
 
 /// Spawn a new thread and start the Solo instance provided by f(). The returned
@@ -21,10 +26,7 @@ pub trait Solo {
 /// logging.
 /// It's necessary to use a provider function as the Solo instance itself is typically
 /// not Send, or we would not need to run it on a single thread in the first place.
-pub fn start<F, I>(
-    f: F,
-    name: &'static str,
-) -> anyhow::Result<(Sender<I::Operation>, JoinHandle<anyhow::Result<()>>)>
+pub fn start<F, I>(f: F, name: &'static str) -> anyhow::Result<Handle<I::Operation>>
 where
     F: FnOnce() -> I + Send + 'static,
     I: Solo + 'static,
@@ -45,10 +47,10 @@ where
         let local = LocalSet::new();
 
         rt.block_on(local.run_until(async {
-            let mut async_work = f();
+            let async_work = f();
             let handle = local.spawn_local(async move {
                 tracing::info!("{} is starting", name);
-                let result: anyhow::Result<()> = async_work.run(rx).await.into();
+                let result: anyhow::Result<()> = async_work.run(rx).await;
                 match &result {
                     Ok(_) => {
                         tracing::info!("{} has shut down", name);
@@ -65,5 +67,5 @@ where
     let tx = dm_rx
         .recv()
         .context(format!("{}: failed to receive Sender", name))?;
-    Ok((tx, handle))
+    Ok(Handle { sender: tx, handle })
 }
