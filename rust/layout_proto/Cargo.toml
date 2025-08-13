@@ -8,11 +8,11 @@ publish = false
 doctest = false
 
 [dependencies]
-prost = "0.13"
+prost = "0"
 tonic = "0"
 
 [build-dependencies]
-tonic-build = "0"
+tonic-prost-build = "0"
 
 [package.metadata.cargo-machete]
 ignored = ["prost"]

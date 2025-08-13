@@ -13,7 +13,7 @@ data_proto = { path = "../data_proto" }
 anyhow = "1"
 bytes = "1"
 hex = "0"
-prost = "0.13"
+prost = "0"
 ring = "0"
 serde = {version = "1", features = ["derive"]}
 thiserror = "2"
