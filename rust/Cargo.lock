@@ -1972,7 +1972,6 @@ dependencies = [
  "broker_client",
  "bytes",
  "crypto",
- "futures",
  "mockall",
  "notify",
  "platform",

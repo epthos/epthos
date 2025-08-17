@@ -277,7 +277,7 @@ impl Filestore for Connection {
     /// we do monotonic progress, even for very large trees that could be done across several
     /// runs.
     #[instrument(skip(self))]
-    fn tree_scan_next(&mut self) -> anyhow::Result<Next<UpdaterImpl>> {
+    fn tree_scan_next(&mut self) -> anyhow::Result<Next<UpdaterImpl<'_>>> {
         let txn = self.conn.transaction()?;
         let aim = settings::get_int(&txn, SETTING_TREE_GEN)?.unwrap_or(0);
         let next =

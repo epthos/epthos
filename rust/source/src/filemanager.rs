@@ -10,10 +10,10 @@ use crate::{
     watcher,
 };
 use anyhow::{Context, bail};
-use futures::FutureExt;
 use std::{
     cmp::min,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex},
     task::Poll,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -427,8 +427,7 @@ impl<O> Future for VecFuture<O> {
         let item = v
             .iter_mut()
             .enumerate()
-            // TODO: implement poll_unpin if nothing else from futures is used.
-            .find_map(|(i, f)| match f.poll_unpin(cx) {
+            .find_map(|(i, f)| match Pin::new(f).poll(cx) {
                 Poll::Ready(e) => Some((i, e)),
                 Poll::Pending => None,
             });
