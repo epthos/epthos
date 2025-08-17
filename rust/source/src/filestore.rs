@@ -10,6 +10,7 @@ use anyhow::{Context, bail};
 use crypto::{SharedRandom, model::EncryptionGroup};
 use field::{LocalPath, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds};
 use file::{Busy, Clean, Dirty, New, State, Unreadable};
+use rand::{Rng, TryRngCore, rngs::OsRng};
 use rusqlite::Transaction;
 use rusqlite_migration::Migrations;
 use settings::Setting;
@@ -47,6 +48,9 @@ pub struct Timing {
     // might still need to take a stab at it. This applies after min_backup_period
     // has passed.
     cool_off_period: (Duration, Duration),
+    // Fraction by which the scan and hash periods are spread, to slowly diffuse the
+    // work.
+    spread: f64,
 }
 
 impl Default for Timing {
@@ -59,6 +63,26 @@ impl Default for Timing {
             // Watch a modified file for at least 5 minutes and at most 30 to wait for
             // it to stabilize before backing it up.
             cool_off_period: (Duration::from_secs(300), Duration::from_secs(1800)),
+            spread: 0.1,
+        }
+    }
+}
+
+impl Timing {
+    fn scan_period(&self) -> Duration {
+        self.spread(self.scan_period)
+    }
+    fn hash_period(&self) -> Duration {
+        self.spread(self.hash_period)
+    }
+    /// Spreads a duration around an initial value. Useful for coordinated work, to
+    /// avoid synchronous events.
+    fn spread(&self, d: Duration) -> Duration {
+        if self.spread > 0.0 {
+            // OsRng is fine here, we don't do crypto with the result.
+            d.mul_f64(1f64 + OsRng.unwrap_err().random_range(-self.spread..self.spread))
+        } else {
+            d
         }
     }
 }
@@ -256,7 +280,7 @@ impl Filestore for Connection {
     /// Configure a new tree scan, and indicate the earliest time the next one should take
     /// place.
     fn tree_scan_start(&mut self, now: SystemTime) -> anyhow::Result<()> {
-        let next_scan = now + self.timing.scan_period;
+        let next_scan = now + self.timing.scan_period();
         let txn = self.conn.transaction()?;
         // Begin by aiming the new scan at the roots.
         let aim = settings::get_int(&txn, SETTING_TREE_GEN)?.unwrap_or(0) + 1;
@@ -395,7 +419,7 @@ impl Filestore for Connection {
                             })
                         } else {
                             // Get ready to hash the file again in the future.
-                            old.next = (now + self.timing.hash_period).into();
+                            old.next = (now + self.timing.hash_period()).into();
                             State::Clean(old)
                         };
                         file::set_state(&tx, &file_repr, current.tree_gen, &next_state)?;
@@ -653,4 +677,20 @@ fn initialize(
         rand,
         timing,
     })
+}
+
+#[cfg(test)]
+mod spread_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn in_range() {
+        let mut t = Timing::default();
+        t.spread = 0.1;
+
+        let d = t.spread(Duration::from_secs(100));
+        assert!(d >= Duration::from_secs((100f64 * 0.9) as u64));
+        assert!(d <= Duration::from_secs((100f64 * 1.1) as u64));
+    }
 }

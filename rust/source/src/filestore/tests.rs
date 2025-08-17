@@ -39,7 +39,8 @@ fn add_and_remove_roots() -> anyhow::Result<()> {
 fn tree_scan_sequence() -> anyhow::Result<()> {
     // Let's validate that scans are scheduled as intended, and progress
     // correctly.
-    let timing = Timing::default();
+    let mut timing = Timing::default();
+    timing.spread = 0.0; // Deterministic timing.
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
     let a = Path::new("a");
     let b = Path::new("b");
@@ -212,7 +213,8 @@ fn tree_update_drop_is_noop() -> anyhow::Result<()> {
 
 #[test]
 fn tree_scan_with_errors() -> anyhow::Result<()> {
-    let timing = Timing::default();
+    let mut timing = Timing::default();
+    timing.spread = 0.0; // Deterministic timing.
     let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), timing.clone())?;
     let p1 = Path::new("/a/b");
     cnx.set_roots(&[p1])?;
@@ -679,8 +681,9 @@ fn full_cycle() -> anyhow::Result<()> {
 }
 
 #[test]
-fn hash_update_progession() -> anyhow::Result<()> {
-    let timing = Timing::default();
+fn hash_update_progression() -> anyhow::Result<()> {
+    let mut timing = Timing::default();
+    timing.spread = 0.0; // Make timing deterministic.
     let egroup = egroup(1);
     let mut cnx = Connection::new_in_memory(
         Arc::new(FakeRandom::new(vec![egroup.clone()])),
