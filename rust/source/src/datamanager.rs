@@ -58,11 +58,7 @@ impl DataManagerImpl {
         C: Clock + Send + 'static,
         D: Disk + Send + 'static,
     {
-        let f = move || Runner {
-            _store: store,
-            clock,
-            disk,
-        };
+        let f = move || Runner { store, clock, disk };
         let handle = solo::start(f, "DataManager")?;
         // Get ready to receive backup slots from the runner.
         let (slot_tx, slot_rx) = mpsc::channel(1);
@@ -123,7 +119,7 @@ where
     C: Clock,
     D: Disk,
 {
-    _store: Datastore,
+    store: Datastore,
     clock: C,
     disk: D,
 }
@@ -162,6 +158,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                         },
                         Some(Op::Enqueue(path, tx)) => {
                             tracing::debug!("Enqueuing backup for {:?}", &path);
+                            self.store.add(path.clone().into())?;
                             // Enqueue the backup.
                             pending.push_front(PendingBackup{path, tx});
                         },
@@ -171,6 +168,8 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                 _ = self.clock.sleep(Duration::from_secs(10), "pause"), if !pending.is_empty() => {
                     tracing::debug!("One backup completed");
                     let p = pending.pop_back().expect("checked above");
+                    self.store.remove(p.path.clone().into())?;
+
                     let result = match self.disk.snapshot(&p.path) {
                         Ok(snapshot) => HashUpdate::Hash(snapshot),
                         Err(err) => HashUpdate::Unreadable(err),
