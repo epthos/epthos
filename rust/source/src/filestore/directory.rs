@@ -1,4 +1,4 @@
-use super::field::LocalPath;
+use crate::sql_model::LocalPath;
 use anyhow::Context;
 use rusqlite::{OptionalExtension, Transaction, named_params};
 use rusqlite_migration::M;
@@ -286,7 +286,7 @@ mod tests {
 #[cfg(test)]
 pub mod pth {
     //! public test helpers
-    use crate::filestore::field::LocalPath;
+    use crate::sql_model::LocalPath;
     use anyhow::Context;
     use std::path::PathBuf;
 

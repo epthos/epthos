@@ -5,10 +5,11 @@
 use crate::{
     disk::{ScanEntry, Snapshot},
     model::{FileSize, ModificationTime},
+    sql_model::LocalPath,
 };
 use anyhow::{Context, bail};
 use crypto::{SharedRandom, model::EncryptionGroup};
-use field::{LocalPath, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds};
+use field::{StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds};
 use file::{Busy, Clean, Dirty, New, State, Unreadable};
 use rand::{Rng, TryRngCore, rngs::OsRng};
 use rusqlite::Transaction;

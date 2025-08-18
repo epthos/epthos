@@ -1,11 +1,8 @@
 use super::{
     Snapshot,
-    field::{
-        FileState, LocalPath, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds,
-        TimeInSeconds,
-    },
+    field::{FileState, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds, TimeInSeconds},
 };
-use crate::model::FileSize;
+use crate::{model::FileSize, sql_model::LocalPath};
 use anyhow::{Context, anyhow};
 use rusqlite::{OptionalExtension, Transaction, named_params, types::FromSqlError};
 use rusqlite_migration::M;
@@ -391,8 +388,7 @@ pub fn matching_egroup(
 #[cfg(test)]
 pub mod pth {
     use super::{File, get_state};
-    use crate::filestore::field::LocalPath;
-
+    use crate::sql_model::LocalPath;
     use std::path::PathBuf;
 
     pub fn dump(conn: &mut rusqlite::Connection) -> anyhow::Result<Vec<(PathBuf, File)>> {

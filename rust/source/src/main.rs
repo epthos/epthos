@@ -11,6 +11,7 @@ mod filestore;
 mod model;
 mod server;
 mod solo;
+mod sql_model;
 mod watcher;
 
 #[cfg(test)]
