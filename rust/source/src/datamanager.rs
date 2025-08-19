@@ -24,8 +24,14 @@ use tokio::{
 pub trait DataManager {
     type Slot: BackupSlot;
 
+    /// Provides the ongoing backups and the receiver for their completion.
+    /// This is to be invoked only once at initialization, to restore the
+    /// client's internal state.
+    async fn in_flight(&mut self) -> Vec<InFlight>;
+
     /// Provides the receiver of new backup slots.
     fn backup_slots(&mut self) -> &mut Receiver<Self::Slot>;
+
     /// Shuts down the manager.
     async fn shutdown(self) -> anyhow::Result<()>;
 }
@@ -38,6 +44,11 @@ pub trait BackupSlot {
 pub struct BackupResult {
     pub path: PathBuf,
     pub update: HashUpdate,
+}
+
+pub struct InFlight {
+    pub path: PathBuf,
+    pub recv: oneshot::Receiver<BackupResult>,
 }
 
 pub async fn new(db: &Path) -> anyhow::Result<DataManagerImpl> {
@@ -86,6 +97,10 @@ impl DataManager for DataManagerImpl {
         let _ = self.tx.send(Op::Shutdown).await;
         self.handle.await??;
         Ok(())
+    }
+
+    async fn in_flight(&mut self) -> Vec<InFlight> {
+        todo!()
     }
 }
 

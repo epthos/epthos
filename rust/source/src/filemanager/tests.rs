@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    datamanager::{BackupResult, BackupSlot},
+    datamanager::{BackupResult, BackupSlot, InFlight},
     disk::ScanEntry,
     fake_clock::FakeClockHandler,
     fake_disk::FakeDisk,
@@ -128,6 +128,10 @@ impl DataManager for FakeDataManager {
 
     async fn shutdown(self) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    async fn in_flight(&mut self) -> Vec<InFlight> {
+        vec![]
     }
 }
 

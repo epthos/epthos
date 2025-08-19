@@ -12,6 +12,7 @@ use crate::{
 use anyhow::{Context, bail};
 use std::{
     cmp::min,
+    collections::HashSet,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
@@ -139,12 +140,37 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
     type Operation = Operation;
 
     async fn run(mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
-        // TODO: ensure those backups are known to the backup layer.
-        let _ = self.store.backup_pending()?;
+        let pending_backups = VecFutures::new();
+        let mut expected: HashSet<PathBuf> = self
+            .store
+            .backup_pending()?
+            .into_iter()
+            .map(|item| item.0)
+            .collect();
+        for actual in self.datamanager.in_flight().await.into_iter() {
+            // In all cases, we know the running backup now.
+            pending_backups.add(actual.recv);
+            expected.remove(&actual.path);
+            // TODO: test that path.
+            if !expected.contains(&actual.path) {
+                // Unusual path: we have a running backup, but we don't track it
+                // as pending. This is recoverable easily, simply start it now.
+                tracing::info!(
+                    "Backup for {:?} is running but not marked as pending",
+                    &actual.path
+                );
+                self.store.backup_start(actual.path)?;
+            }
+        }
+        // Second unexpected path: backups we expected to see running already, but which
+        // are not. This should not happen unless there is data corruption as we start it
+        // first then mark it as started.
+        if !expected.is_empty() {
+            bail!("The following backups are missing: {:?}", expected);
+        }
 
         let mut scan_delay: Option<SystemTime> = None;
         let mut backup_slot: Option<DM::Slot> = None;
-        let pending_backups = VecFutures::new();
         // The work loop will continuously refresh the filesystem when a scan is
         // active, hash files that haven't changed in a while, and otherwise respond
         // to client requests.
