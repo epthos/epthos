@@ -130,8 +130,8 @@ impl DataManager for FakeDataManager {
         Ok(())
     }
 
-    async fn in_flight(&mut self) -> Vec<InFlight> {
-        vec![]
+    async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>> {
+        Ok(vec![])
     }
 }
 

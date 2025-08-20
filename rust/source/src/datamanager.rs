@@ -27,7 +27,7 @@ pub trait DataManager {
     /// Provides the ongoing backups and the receiver for their completion.
     /// This is to be invoked only once at initialization, to restore the
     /// client's internal state.
-    async fn in_flight(&mut self) -> Vec<InFlight>;
+    async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>>;
 
     /// Provides the receiver of new backup slots.
     fn backup_slots(&mut self) -> &mut Receiver<Self::Slot>;
@@ -46,6 +46,7 @@ pub struct BackupResult {
     pub update: HashUpdate,
 }
 
+#[derive(Debug)]
 pub struct InFlight {
     pub path: PathBuf,
     pub recv: oneshot::Receiver<BackupResult>,
@@ -99,8 +100,10 @@ impl DataManager for DataManagerImpl {
         Ok(())
     }
 
-    async fn in_flight(&mut self) -> Vec<InFlight> {
-        todo!()
+    async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Op::InFlight(tx)).await?;
+        rx.await.context("from DataManager")
     }
 }
 
@@ -109,6 +112,7 @@ enum Op {
     // Initialize the Runner, which needs to know how to return backup slots.
     Init((Sender<BackupSlotImpl>, Sender<Op>)),
     Enqueue(PathBuf, oneshot::Sender<BackupResult>),
+    InFlight(oneshot::Sender<Vec<InFlight>>),
     // We can't rely on dropping the sender in the manager as we clone it in every
     // backup slot too.
     Shutdown,
@@ -176,6 +180,18 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                             self.store.add(path.clone().into())?;
                             // Enqueue the backup.
                             pending.push_front(PendingBackup{path, tx});
+                        },
+                        Some(Op::InFlight(op_tx)) => {
+                            let mut response = vec![];
+                            for path in self.store.list()? {
+                                let path : PathBuf = path.try_into()?;
+                                let (bk_tx, bk_rx) = oneshot::channel();
+                                response.push(InFlight{path: path.clone(), recv: bk_rx});
+                                pending.push_front(PendingBackup{path, tx: bk_tx});
+                            }
+                            if let Err(_) = op_tx.send(response) {
+                                bail!("peer died");
+                            }
                         },
                         None | Some(Op::Shutdown) => break,
                     }

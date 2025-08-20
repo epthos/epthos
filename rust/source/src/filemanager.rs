@@ -147,7 +147,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             .into_iter()
             .map(|item| item.0)
             .collect();
-        for actual in self.datamanager.in_flight().await.into_iter() {
+        for actual in self.datamanager.in_flight().await?.into_iter() {
             // In all cases, we know the running backup now.
             pending_backups.add(actual.recv);
             expected.remove(&actual.path);
