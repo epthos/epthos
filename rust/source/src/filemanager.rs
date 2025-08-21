@@ -171,6 +171,8 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
 
         let mut scan_delay: Option<SystemTime> = None;
         let mut backup_slot: Option<DM::Slot> = None;
+        let mut event_last_displayed = EarliestEvent::unset("nope");
+
         // The work loop will continuously refresh the filesystem when a scan is
         // active, hash files that haven't changed in a while, and otherwise respond
         // to client requests.
@@ -199,6 +201,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             if backup_slot.is_some() {
                 match self.store.backup_next(now)? {
                     Next::Next(path, _egroup) => {
+                        tracing::info!("starting new backup for {:?}", &path);
                         let slot = backup_slot.take().unwrap();
                         // We enqueue first, so that if there is a crash we can use _running_ backups to
                         // fill in the list of _started_ backups, without waiting for the backup queue.
@@ -217,6 +220,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                     filestore::Next::Done(delay) => {
                         next_event = min(next_event, EarliestEvent::new(delay, "tree scan"));
                         scan_delay = Some(delay);
+                        tracing::info!("finished tree scan, next at {}", isotime(delay)?);
                     }
                     filestore::Next::Next(dir, mut updater) => {
                         tracing::debug!("scanning {:?}", &dir);
@@ -247,11 +251,16 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             let can_backup = backup_slot.is_some() && backup_delay.is_none();
             let more_pending = [&scan_delay, &hash_delay].iter().any(|d| d.is_none()) || can_backup;
             if !more_pending && next_event.is_valid() {
-                tracing::info!(
-                    "waiting for next {} at {}",
-                    next_event.event,
-                    isotime(next_event.time)?,
-                );
+                // Do not repeat the same message, as we might be spinning a few
+                // time, say when the watcher repeatedly interrupts us.
+                if next_event != event_last_displayed {
+                    tracing::info!(
+                        "idling until next {} at {}",
+                        next_event.event,
+                        isotime(next_event.time)?,
+                    );
+                    event_last_displayed = next_event;
+                }
             }
             tokio::select! {
                 _ = self.clock.sleep(Duration::from_millis(1), "tick"), if more_pending => {
