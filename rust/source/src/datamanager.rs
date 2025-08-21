@@ -155,6 +155,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
         let Some(Op::Init((slot_sender, op_sender))) = rx.recv().await else {
             bail!("Initialization failed");
         };
+        // remaining should come from actual capacity vs currently pending backups.
         let mut remaining = 1;
         let mut pending = VecDeque::new();
         loop {
@@ -188,6 +189,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                                 let (bk_tx, bk_rx) = oneshot::channel();
                                 response.push(InFlight{path: path.clone(), recv: bk_rx});
                                 pending.push_front(PendingBackup{path, tx: bk_tx});
+                                remaining -= 1;
                             }
                             if let Err(_) = op_tx.send(response) {
                                 bail!("peer died");
@@ -206,7 +208,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                         Err(err) => HashUpdate::Unreadable(err),
                     };
                     if let Err(result) = p.tx.send(BackupResult{path: p.path, update: result}) {
-                        tracing::warn!("failed to send {:?}", result);
+                        bail!("failed to send {:?}", result);
                     }
                     remaining += 1;
                 }

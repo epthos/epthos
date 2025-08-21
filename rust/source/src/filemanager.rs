@@ -148,9 +148,6 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             .map(|item| item.0)
             .collect();
         for actual in self.datamanager.in_flight().await?.into_iter() {
-            // In all cases, we know the running backup now.
-            pending_backups.add(actual.recv);
-            expected.remove(&actual.path);
             // TODO: test that path.
             if !expected.contains(&actual.path) {
                 // Unusual path: we have a running backup, but we don't track it
@@ -160,9 +157,13 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                     &actual.path
                 );
                 self.store.backup_start(actual.path)?;
+            } else {
+                expected.remove(&actual.path);
             }
+            // In all cases, we know the running backup now.
+            pending_backups.add(actual.recv);
         }
-        // Second unexpected path: backups we expected to see running already, but which
+        // Really unexpected path: backups we expected to see running already, but which
         // are not. This should not happen unless there is data corruption as we start it
         // first then mark it as started.
         if !expected.is_empty() {
