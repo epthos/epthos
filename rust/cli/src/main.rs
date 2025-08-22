@@ -165,7 +165,7 @@ enum Error {
 }
 
 fn sink(keyfile: &str, certfile: &str, overwrite: bool) -> anyhow::Result<()> {
-    let anchor = settings::get_anchor(None)?;
+    let anchor = sink_settings::anchor()?;
     let path = source_settings::Builder::path(&anchor);
     if path.exists() && !overwrite {
         Err(Error::AlreadyExists(path))?;
@@ -186,7 +186,7 @@ fn source(
     root: Vec<PathBuf>,
     overwrite: bool,
 ) -> anyhow::Result<()> {
-    let anchor = settings::get_anchor(None)?;
+    let anchor = source_settings::anchor()?;
     let path = source_settings::Builder::path(&anchor);
     if path.exists() && !overwrite {
         Err(Error::AlreadyExists(path))?;
@@ -209,7 +209,7 @@ fn client(
     address: &str,
     overwrite: bool,
 ) -> anyhow::Result<()> {
-    let anchor = settings::get_anchor(None)?;
+    let anchor = cli_settings::anchor()?;
     let path = cli_settings::Builder::path(&anchor);
     if path.exists() && !overwrite {
         Err(Error::AlreadyExists(path))?;

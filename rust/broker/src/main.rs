@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let settings =
         server::settings::load(args.home).context("Failed to load the Broker settings")?;
-    let _guard = process::init(settings.process())?;
+    process::init(settings.process())?;
 
     let server = Server::builder()
         .settings(&settings)?

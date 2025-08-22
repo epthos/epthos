@@ -30,7 +30,7 @@ fn new_source(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::key::
 #[tokio::main]
 async fn main() -> Result<()> {
     let settings = source_settings::load().context("Failed to load the Source settings")?;
-    let _guard = process::init(settings.process())?;
+    process::init(settings.process())?;
 
     let rnd = Arc::new(crypto::Random::new());
     // TODO: we should be very conservative about regenerating the key, in case something requires

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use settings::{
-    client, connection,
+    Anchor, client, connection,
     process::{self, wire::TracingLevel},
 };
 use strum::IntoEnumIterator;
@@ -11,7 +11,12 @@ use thiserror::Error;
 
 /// Loads and validates the settings.
 pub fn load() -> anyhow::Result<Settings> {
-    load_impl(&settings::get_anchor(None)?)
+    load_impl(&anchor()?)
+}
+
+/// Resolve the anchor for the CLI settings.
+pub fn anchor() -> anyhow::Result<Anchor> {
+    settings::get_anchor(NAME.to_owned(), None).context("can't get the anchor")
 }
 
 pub struct Settings {
@@ -75,7 +80,7 @@ impl Builder {
     }
 
     pub fn path(anchor: &settings::Anchor) -> PathBuf {
-        settings::path(NAME, anchor)
+        settings::path(anchor)
     }
 
     pub fn save(self, anchor: &settings::Anchor) -> anyhow::Result<()> {
@@ -96,7 +101,7 @@ impl Builder {
                 tracing_level: TracingLevel::INFO,
             },
         };
-        settings::save(&settings, NAME, anchor)?;
+        settings::save(&settings, anchor)?;
         Ok(())
     }
 }
@@ -128,7 +133,7 @@ impl settings::Anchored for Settings {
 const NAME: &str = "cli";
 
 fn load_impl(anchor: &settings::Anchor) -> anyhow::Result<Settings> {
-    settings::load::<Settings>(NAME, anchor)
+    settings::load::<Settings>(anchor)
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, EnumIter)]
@@ -148,7 +153,7 @@ mod tests {
     fn roundtrip() -> anyhow::Result<()> {
         let tmpdir = TempDir::new()?;
         let cfg = tmpdir.path().join("cfg");
-        let anchor = settings::get_anchor(Some(cfg.clone()))?;
+        let anchor = settings::get_anchor("test".to_owned(), Some(cfg.clone()))?;
         Builder::default()
             .certificate("")
             .private_key("")

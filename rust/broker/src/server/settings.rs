@@ -18,8 +18,8 @@ mod wire {
 }
 
 pub fn load(home: Option<PathBuf>) -> anyhow::Result<Settings> {
-    let anchor = settings::get_anchor(home)?;
-    settings::load::<Settings>("broker", &anchor)
+    let anchor = settings::get_anchor("broker".to_owned(), home)?;
+    settings::load::<Settings>(&anchor)
 }
 
 pub struct Settings {

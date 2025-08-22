@@ -1,13 +1,18 @@
 //! Load and manipulate settings for a Sink.
 use anyhow::Context;
-use settings::{client, connection, process, server};
+use settings::{Anchor, client, connection, process, server};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use thiserror::Error;
 
 /// Loads and validates the settings.
 pub fn load() -> anyhow::Result<Settings> {
-    load_impl(&settings::get_anchor(None)?)
+    load_impl(&anchor()?)
+}
+
+/// Resolve the anchor for the Sink settings.
+pub fn anchor() -> anyhow::Result<Anchor> {
+    settings::get_anchor(NAME.to_owned(), None).context("can't get the anchor")
 }
 
 /// All the validated settings.
@@ -66,7 +71,7 @@ impl Builder {
     }
 
     pub fn path(anchor: &settings::Anchor) -> std::path::PathBuf {
-        settings::path(NAME, anchor)
+        settings::path(anchor)
     }
 
     pub fn save(self, anchor: &settings::Anchor) -> anyhow::Result<()> {
@@ -90,13 +95,13 @@ impl Builder {
                 address: self.address,
             },
         };
-        settings::save(&settings, NAME, anchor)?;
+        settings::save(&settings, anchor)?;
         Ok(())
     }
 }
 
 fn load_impl(anchor: &settings::Anchor) -> anyhow::Result<Settings> {
-    settings::load::<Settings>(NAME, anchor)
+    settings::load::<Settings>(anchor)
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, EnumIter)]
@@ -150,7 +155,7 @@ mod test {
     fn check_all_fields() -> anyhow::Result<()> {
         let tmpdir = TempDir::new()?;
         let cfg = tmpdir.path().join("cfg");
-        match Builder::default().save(&settings::get_anchor(Some(cfg))?) {
+        match Builder::default().save(&settings::get_anchor("test".to_owned(), Some(cfg))?) {
             Err(_) => {}
             Ok(_) => panic!("unexpectedly passed"),
         }
@@ -161,7 +166,7 @@ mod test {
     fn roundtrip() -> anyhow::Result<()> {
         let tmpdir = TempDir::new()?;
         let cfg = tmpdir.path().join("cfg");
-        let anchor = settings::get_anchor(Some(cfg))?;
+        let anchor = settings::get_anchor("test".to_owned(), Some(cfg))?;
         Builder::default()
             .address("127.0.0.1:1234")
             .certificate("")

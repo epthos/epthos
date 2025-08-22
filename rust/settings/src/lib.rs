@@ -29,20 +29,20 @@ use std::{
 };
 
 /// Return the path to the specified anchored config.
-pub fn path(name: &str, anchor: &Anchor) -> PathBuf {
-    Path::join(anchor.root.as_ref(), format!("{}.toml", name))
+pub fn path(anchor: &Anchor) -> PathBuf {
+    Path::join(anchor.root.as_ref(), format!("{}.toml", &anchor.name))
 }
 
 /// Helper to load settings from a standard location.
-pub fn load<T: Anchored>(name: &str, anchor: &Anchor) -> anyhow::Result<T> {
-    let file = path(name, anchor);
+pub fn load<T: Anchored>(anchor: &Anchor) -> anyhow::Result<T> {
+    let file = path(anchor);
     let toml_data = fs::read_to_string(&file).context(format!("Config file is {:?}", &file))?;
     load_from_str(&toml_data, anchor)
 }
 
 /// Helper to save the underlying representation of data in the standard location.
-pub fn save<T: serde::Serialize>(data: &T, name: &str, anchor: &Anchor) -> anyhow::Result<()> {
-    let file = path(name, anchor);
+pub fn save<T: serde::Serialize>(data: &T, anchor: &Anchor) -> anyhow::Result<()> {
+    let file = path(anchor);
     fs::write(&file, save_to_str(data)?)?;
 
     Ok(())
@@ -52,6 +52,7 @@ pub fn save<T: serde::Serialize>(data: &T, name: &str, anchor: &Anchor) -> anyho
 /// are stored. A valid Anchor validates permissions and ensures settings
 /// are evaluated in the right location.
 pub struct Anchor {
+    name: String,
     root: PathBuf,
 }
 
@@ -137,6 +138,7 @@ pub mod connection {
 /// Common settings used by all processes, servers and clients.
 pub mod process {
     use super::*;
+    use logroller::{Compression, LogRollerBuilder, Rotation, RotationAge, TimeZone};
     use tracing::level_filters::LevelFilter;
     use tracing_subscriber::prelude::*;
 
@@ -161,6 +163,7 @@ pub mod process {
 
     pub struct Settings {
         level: LevelFilter,
+        logfile: Option<PathBuf>,
     }
 
     impl Settings {
@@ -172,7 +175,7 @@ pub mod process {
     impl Anchored for Settings {
         type Wire = wire::Settings;
 
-        fn anchor(wire: &Self::Wire, _anchor: &Anchor) -> anyhow::Result<Self> {
+        fn anchor(wire: &Self::Wire, anchor: &Anchor) -> anyhow::Result<Self> {
             Ok(Settings {
                 level: match wire.tracing_level {
                     wire::TracingLevel::TRACE => LevelFilter::TRACE,
@@ -181,33 +184,65 @@ pub mod process {
                     wire::TracingLevel::WARN => LevelFilter::WARN,
                     wire::TracingLevel::ERROR => LevelFilter::ERROR,
                 },
+                logfile: Some(
+                    anchor
+                        .root
+                        .join("logs")
+                        .join(format!("{}.log", &anchor.name)),
+                ),
             })
         }
     }
 
     /// Initializes the process with the provided settings.
     #[allow(dyn_drop)]
-    pub fn init(settings: &Settings) -> anyhow::Result<Option<Box<dyn Drop>>> {
-        let logging = tracing_subscriber::fmt::layer()
-            .with_thread_ids(true)
-            .with_filter(settings.trace_level());
+    pub fn init(settings: &Settings) -> anyhow::Result<()> {
+        let mut layers = Vec::new();
+
+        if let Some(ref logfile) = settings.logfile {
+            let dir = logfile.parent().context("log dir is incomplete")?;
+            let file = logfile.file_name().context("log dir is incomplete")?;
+            std::fs::create_dir_all(dir).context("failed to create log dir")?;
+
+            let appender = LogRollerBuilder::new(dir, Path::new(file))
+                .rotation(Rotation::AgeBased(RotationAge::Daily))
+                .max_keep_files(30)
+                .time_zone(TimeZone::Local) // Use system local time zone when rotating files
+                .compression(Compression::Gzip) // Compress rotated files with Gzip
+                .build()?;
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            layers.push(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer)
+                    .with_ansi(false)
+                    .with_thread_ids(true)
+                    .with_filter(settings.trace_level())
+                    .boxed(),
+            );
+            std::mem::forget(guard); // Will log till the end of times.
+        } else {
+            layers.push(
+                tracing_subscriber::fmt::layer()
+                    .with_thread_ids(true)
+                    .with_filter(settings.trace_level())
+                    .boxed(),
+            );
+        }
 
         if let Ok(flame) = std::env::var("EPTHOS_FLAME") {
             let (flame_layer, guard) = tracing_flame::FlameLayer::with_file(flame)?;
-            tracing_subscriber::registry()
-                .with(logging)
-                .with(flame_layer)
-                .init();
-            return Ok(Some(Box::new(guard)));
+            layers.push(flame_layer.boxed());
+            std::mem::forget(guard); // Will measure till the end of times.
         }
-        tracing_subscriber::registry().with(logging).init();
-        Ok(None)
+        tracing_subscriber::registry().with(layers).init();
+        Ok(())
     }
 
     #[allow(dyn_drop)]
-    pub fn debug() -> anyhow::Result<Option<Box<dyn Drop>>> {
+    pub fn debug() -> anyhow::Result<()> {
         init(&Settings {
             level: LevelFilter::TRACE,
+            logfile: None,
         })
     }
 }
@@ -331,9 +366,9 @@ pub enum SettingsError {
 }
 
 impl Anchor {
-    fn new(root: PathBuf) -> Result<Anchor, SettingsError> {
+    fn new(name: String, root: PathBuf) -> Result<Anchor, SettingsError> {
         platform::private_directory(&root)?;
-        Ok(Anchor { root })
+        Ok(Anchor { name, root })
     }
 }
 
@@ -347,12 +382,12 @@ fn save_to_str<T: serde::Serialize>(data: &T) -> anyhow::Result<String> {
 }
 
 /// Returns a valid anchor for the config.
-pub fn get_anchor(default: Option<PathBuf>) -> Result<Anchor, SettingsError> {
+pub fn get_anchor(name: String, default: Option<PathBuf>) -> Result<Anchor, SettingsError> {
     let root = default
         .or(home_override())
         .or(default_home())
         .ok_or(SettingsError::MissingConfigurationDirectory)?;
-    Anchor::new(root)
+    Anchor::new(name, root)
 }
 
 fn home_override() -> Option<PathBuf> {
@@ -391,6 +426,7 @@ mod tests {
         // Intentionally bypass directory validation as we only test
         // anchoring of paths.
         let anchor = Anchor {
+            name: "test".to_owned(),
             root: settings_dir.clone(),
         };
         let cfg_path: ConfigPath = cfg.clone().into();
@@ -407,6 +443,7 @@ address = "127.0.0.1:1234"
         // Intentionally bypass directory validation as we only test
         // file parsing.
         let anchor = Anchor {
+            name: "test".to_owned(),
             root: "path".into(),
         };
         let parsed: server::Settings = load_from_str(toml, &anchor)?;

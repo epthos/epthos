@@ -1,5 +1,5 @@
 use anyhow::Context;
-use settings::{client, connection, process, server};
+use settings::{Anchor, client, connection, process, server};
 use std::path::{Path, PathBuf};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -7,7 +7,12 @@ use thiserror::Error;
 
 /// Loads and validates the settings.
 pub fn load() -> anyhow::Result<Settings> {
-    load_impl(&settings::get_anchor(None)?)
+    load_impl(&anchor()?)
+}
+
+/// Resolve the anchor for the Source settings.
+pub fn anchor() -> anyhow::Result<Anchor> {
+    settings::get_anchor(NAME.to_owned(), None).context("can't get the anchor")
 }
 
 /// All the validated settings.
@@ -137,7 +142,7 @@ impl Builder {
     }
 
     pub fn path(anchor: &settings::Anchor) -> PathBuf {
-        settings::path(NAME, anchor)
+        settings::path(anchor)
     }
 
     pub fn save(self, anchor: &settings::Anchor) -> anyhow::Result<()> {
@@ -171,13 +176,13 @@ impl Builder {
                 db: "datastore".into(),
             },
         };
-        settings::save(&settings, NAME, anchor)?;
+        settings::save(&settings, anchor)?;
         Ok(())
     }
 }
 
 pub fn load_impl(anchor: &settings::Anchor) -> anyhow::Result<Settings> {
-    settings::load::<Settings>(NAME, anchor)
+    settings::load::<Settings>(anchor)
 }
 
 // Canonical name of the config file.
@@ -288,7 +293,7 @@ mod test {
     fn check_all_fields() -> anyhow::Result<()> {
         let tmpdir = TempDir::new()?;
         let cfg = tmpdir.path().join("cfg");
-        match Builder::default().save(&settings::get_anchor(Some(cfg))?) {
+        match Builder::default().save(&settings::get_anchor("test".to_owned(), Some(cfg))?) {
             Err(_) => {}
             Ok(_) => panic!("unexpectedly passed"),
         }
@@ -309,7 +314,7 @@ mod test {
     fn roundtrip() -> anyhow::Result<()> {
         let tmpdir = TempDir::new()?;
         let cfg = tmpdir.path().join("cfg");
-        let anchor = settings::get_anchor(Some(cfg.clone()))?;
+        let anchor = settings::get_anchor("test".to_owned(), Some(cfg.clone()))?;
         // The builder validates that the roots exist. So we need to create them
         // for the test and canonicalize them, to ensure there is no risk of them
         // not round-tripping.

@@ -10,9 +10,11 @@ doctest = false
 [dependencies]
 platform = { path = "../platform" }
 anyhow = "1"
+logroller = "0"
 serde = { version = "1", features = ["derive"] }
 tonic = { version = "0", features = ["tls-ring"] }
 tracing = "0"
+tracing-appender = "0"
 tracing-subscriber = "0"
 tracing-flame = "0"
 thiserror = "2"
