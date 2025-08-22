@@ -275,6 +275,10 @@ impl Filestore for FakeStore {
     ) -> anyhow::Result<()> {
         todo!()
     }
+
+    fn get_stats(&mut self) -> anyhow::Result<Stats> {
+        todo!()
+    }
 }
 
 struct FakeUpdater {}

@@ -2,7 +2,10 @@ use super::{
     Snapshot,
     field::{FileState, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds, TimeInSeconds},
 };
-use crate::{model::FileSize, sql_model::LocalPath};
+use crate::{
+    model::{FileSize, Stats},
+    sql_model::LocalPath,
+};
 use anyhow::{Context, anyhow};
 use rusqlite::{OptionalExtension, Transaction, named_params, types::FromSqlError};
 use rusqlite_migration::M;
@@ -383,6 +386,20 @@ pub fn matching_egroup(
     )
     .optional()
     .context("matching_egroup")
+}
+
+pub fn stats(txn: &Transaction) -> anyhow::Result<Stats> {
+    let mut stats = Stats::default();
+    stats.total_file_count = txn
+        .query_row(
+            r#"
+            SELECT COUNT(*) FROM File
+        "#,
+            rusqlite::named_params! {},
+            |row| Ok(row.get(0)?),
+        )
+        .context("computing stats")?;
+    Ok(stats)
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use crate::{
     datamanager::{BackupSlot, DataManager, DataManagerImpl},
     disk::{self, Disk},
     filestore::{self, Connection, Filestore, HashUpdate, Next, Scanner, Timing},
+    model::Stats,
     solo::{self, Solo},
     watcher,
 };
@@ -101,11 +102,19 @@ impl FileManager {
         rx.recv().await.context("WatcherImpl closed early")??;
         Ok(())
     }
+
+    #[allow(dead_code)] // TODO: use it!
+    pub async fn get_stats(&self) -> anyhow::Result<Stats> {
+        let (tx, rx) = oneshot::channel::<anyhow::Result<Stats>>();
+        self.tx.send(Operation::GetStats(tx)).await?;
+        rx.await.context("FileManager Runner closed early")?
+    }
 }
 
 #[derive(Debug)]
 enum Operation {
     SetRoots(Vec<PathBuf>, Sender<anyhow::Result<()>>),
+    GetStats(oneshot::Sender<anyhow::Result<Stats>>),
 }
 
 struct Runner<S, D, C, DM>
@@ -284,6 +293,9 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         Some(Operation::SetRoots(roots, tx)) => {
                             let refs: Vec<&Path> = roots.iter().map(|r| r.as_ref()).collect();
                             let _ = tx.send(self.set_roots(&refs)).await;
+                        },
+                        Some(Operation::GetStats(tx)) => {
+                            let _ = tx.send(self.store.get_stats());
                         }
                     }
                 }

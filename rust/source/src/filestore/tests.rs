@@ -853,6 +853,36 @@ fn cool_off_with_metadata_update() -> anyhow::Result<()> {
 }
 
 #[test]
+fn compute_stats() -> anyhow::Result<()> {
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
+    let a = Path::new("a");
+    let f1 = a.join("f1");
+    let f2 = a.join("f2");
+    let d1 = a.join("d1");
+
+    let t1 = secs(1000);
+    // 2 files, 1 directory.
+    db_setup(
+        cnx.conn(),
+        vec![HashMap::from([
+            (f1, State::New(New { next: t1 })),
+            (f2, State::New(New { next: t1 })),
+        ])],
+        vec![HashSet::from([d1])],
+    )?;
+
+    let stats = cnx.get_stats()?;
+    assert_eq!(
+        stats,
+        Stats {
+            total_file_count: 2 // we report files.
+        }
+    );
+
+    Ok(())
+}
+
+#[test]
 fn migrations_test() {
     assert!(Connection::migrations().validate().is_ok());
 }

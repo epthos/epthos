@@ -4,7 +4,7 @@
 //! to ensure testability and isolation.
 use crate::{
     disk::{ScanEntry, Snapshot},
-    model::{FileSize, ModificationTime},
+    model::{FileSize, ModificationTime, Stats},
     sql_model::LocalPath,
 };
 use anyhow::{Context, bail};
@@ -129,7 +129,6 @@ pub trait Filestore {
     /// Record a file's backup as having completed, with the provided |update| as the
     /// state as of the backup. |next| indicates the next time it should be hashed
     /// again.
-    #[allow(dead_code)] // TODO: use it!
     fn backup_done(
         &mut self,
         path: PathBuf,
@@ -139,6 +138,9 @@ pub trait Filestore {
     /// Return all the pending backups. Typically used to ensure the backup engine
     /// has the right state.
     fn backup_pending(&mut self) -> anyhow::Result<Vec<(PathBuf, EncryptionGroup)>>;
+
+    // Extract stats about the files.
+    fn get_stats(&mut self) -> anyhow::Result<Stats>;
 }
 
 /// Scanner defines how the content of a specific directory is being updated.
@@ -542,6 +544,11 @@ impl Filestore for Connection {
                 },
             )
             .collect()
+    }
+
+    fn get_stats(&mut self) -> anyhow::Result<Stats> {
+        let txn = self.conn.transaction()?;
+        file::stats(&txn)
     }
 }
 

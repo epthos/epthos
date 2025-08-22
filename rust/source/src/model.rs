@@ -15,6 +15,11 @@ pub enum FileHashConversionError {
     UnexpectedSize(usize),
 }
 
+#[derive(Debug, PartialEq, Default)]
+pub struct Stats {
+    pub total_file_count: i32,
+}
+
 const HASH_SIZE: usize = 32;
 
 /// Infaillible conversion from a Digest, as we control which
