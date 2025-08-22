@@ -237,7 +237,7 @@ mod tests {
         let mut dm = DataManagerImpl::new(ds, clock, FakeDisk::new()).await?;
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
-        slot.enqueue(PathBuf::from("/a")).await?;
+        let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
 
         let handle = clock_state.wait("pause").await;
         assert_eq!(handle.delay, Duration::from_secs(10));
@@ -249,6 +249,8 @@ mod tests {
         }
         // Pretend the backup completed.
         handle.done();
+        let _ = backup_done.await; // we don't expect this to succeed.
+
         let _ = dm.backup_slots().recv().await.context("no slot!")?;
         tracing::debug!("received");
 
