@@ -1982,6 +1982,7 @@ dependencies = [
  "rusqlite_migration",
  "settings",
  "sink_client",
+ "source_proto",
  "source_settings",
  "storage",
  "tempfile",
@@ -1992,6 +1993,15 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+]
+
+[[package]]
+name = "source_proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]

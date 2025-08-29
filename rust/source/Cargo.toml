@@ -15,6 +15,7 @@ platform = {path = "../platform"}
 rpcutil = {path = "../rpcutil"}
 settings = {path = "../settings"}
 sink_client = {path = "../sink_client"}
+source_proto = {path = "../source_proto"}
 source_settings = {path = "../source_settings"}
 storage = {path = "../storage"}
 

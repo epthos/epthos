@@ -6,12 +6,16 @@ use crate::{
 use anyhow::Context;
 use settings::connection;
 use source_settings::Settings;
-use std::path::{Path, PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 use storage::fingerprint;
 
 #[derive(Default)]
 pub struct Builder {
     roots: Vec<PathBuf>,
+    address: Option<SocketAddr>,
     connection: Option<connection::Info>,
     broker: Option<broker_client::Settings>,
     filestore: PathBuf,
@@ -22,6 +26,8 @@ pub struct Builder {
 
 #[derive(thiserror::Error, Debug)]
 pub enum BuilderError {
+    #[error("Missing address")]
+    MissingAddress,
     #[error("Missing connection settings")]
     MissingConnection,
     #[error("Missing Broker info")]
@@ -37,6 +43,7 @@ pub enum BuilderError {
 impl Builder {
     pub fn settings(self, settings: &Settings) -> Builder {
         self.roots(settings.backup().roots().clone())
+            .address(settings.server().address().clone())
             .connection(settings.connection())
             .broker(settings.broker())
             .filestore(settings.filestore().db())
@@ -45,6 +52,11 @@ impl Builder {
 
     pub fn roots(mut self, roots: Vec<PathBuf>) -> Builder {
         self.roots = roots;
+        self
+    }
+
+    pub fn address(mut self, address: SocketAddr) -> Builder {
+        self.address = Some(address);
         self
     }
 
@@ -76,15 +88,15 @@ impl Builder {
 
     pub async fn build(self) -> Result<Server<peer::PeerImpl>, BuilderError> {
         let connection = self.connection.ok_or(BuilderError::MissingConnection)?;
+        let address = self.address.ok_or(BuilderError::MissingAddress)?;
         let broker_info = self.broker.ok_or(BuilderError::MissingBrokerInfo)?;
         let broker = broker_client::new(&connection, &broker_info).await?;
-        let peer = peer::new(broker, connection);
+        let peer = peer::new(broker, connection.clone());
         let rnd = self.rnd.ok_or(BuilderError::MissingCrypto)?;
         let _source_key = self.source_key.ok_or(BuilderError::MissingCrypto)?;
-        // TODO: this is where we should create the new threads. They will wait
-        // for the localset to complete (using rt.block_on()?) and communicate the
-        // status back somehow.
         Ok(Server {
+            connection,
+            address,
             roots: self.roots,
             _peer: peer,
             manager: filemanager::new(

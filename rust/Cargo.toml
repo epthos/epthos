@@ -15,6 +15,7 @@ members = [
     "rpcutil",
     "settings",
     "source",
+    "source_proto",
     "source_settings",
     "sink",
     "sink_client", 

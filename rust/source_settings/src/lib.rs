@@ -1,5 +1,5 @@
 use anyhow::Context;
-use settings::{connection, process};
+use settings::{connection, process, server};
 use std::path::{Path, PathBuf};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -14,6 +14,7 @@ pub fn load() -> anyhow::Result<Settings> {
 pub struct Settings {
     broker: broker_client::Settings,
     connection: connection::Settings,
+    server: server::Settings,
     process: process::Settings,
     backup: Backup,
     filestore: Filestore,
@@ -43,6 +44,10 @@ impl Settings {
 
     pub fn connection(&self) -> &connection::Settings {
         &self.connection
+    }
+
+    pub fn server(&self) -> &server::Settings {
+        &self.server
     }
 
     pub fn process(&self) -> &process::Settings {
@@ -90,6 +95,7 @@ impl Datastore {
 pub struct Builder {
     certificate: String,
     private_key: String,
+    address: String,
     root: Vec<PathBuf>,
 
     set: std::collections::HashSet<Fields>,
@@ -105,6 +111,12 @@ impl Builder {
     pub fn private_key<T: Into<String>>(mut self, private_key: T) -> Builder {
         self.private_key = private_key.into();
         self.set.insert(Fields::PrivateKey);
+        self
+    }
+
+    pub fn address<T: Into<String>>(mut self, address: T) -> Builder {
+        self.address = address.into();
+        self.set.insert(Fields::Address);
         self
     }
 
@@ -142,6 +154,9 @@ impl Builder {
                 certificate: self.certificate,
                 private_key: self.private_key,
             },
+            server: server::wire::Settings {
+                address: self.address,
+            },
             process: process::wire::Settings {
                 tracing_level: process::wire::TracingLevel::INFO,
             },
@@ -172,6 +187,7 @@ const NAME: &str = "source";
 enum Fields {
     Certificate,
     PrivateKey,
+    Address,
     Root,
 }
 
@@ -190,6 +206,7 @@ mod wire {
     pub struct Settings {
         pub broker: broker_client::wire::Settings,
         pub connection: connection::wire::Settings,
+        pub server: server::wire::Settings,
         pub process: process::wire::Settings,
         pub backup: Backup,
         pub filestore: Filestore,
@@ -222,6 +239,7 @@ impl settings::Anchored for Settings {
             broker: broker_client::Settings::anchor(&wire.broker, anchor)?,
             connection: connection::Settings::anchor(&wire.connection, anchor)?,
             process: process::Settings::anchor(&wire.process, anchor)?,
+            server: server::Settings::anchor(&wire.server, anchor)?,
             backup: Backup::anchor(&wire.backup, anchor)?,
             filestore: Filestore::anchor(&wire.filestore, anchor)?,
             datastore: Datastore::anchor(&wire.datastore, anchor)?,
@@ -262,6 +280,8 @@ impl settings::Anchored for Datastore {
 
 #[cfg(test)]
 mod test {
+    use std::net::SocketAddr;
+
     use super::*;
     use tempfile::TempDir;
 
@@ -306,12 +326,15 @@ mod test {
             .root(&roots)?
             .certificate("")
             .private_key("")
+            .address("127.0.0.1:1111")
             .save(&anchor)?;
 
         let settings = load_impl(&anchor)?;
         assert_eq!(settings.backup().roots(), &roots);
         assert_eq!(settings.backup().keyfile(), cfg.join("keyfile"));
         assert_eq!(settings.filestore().db(), cfg.join("filestore"));
+        let addr: SocketAddr = "127.0.0.1:1111".parse()?;
+        assert_eq!(settings.server().address(), &addr);
         // TODO: validate certificates
         Ok(())
     }

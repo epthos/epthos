@@ -24,14 +24,15 @@ use test_log::test;
 
 #[test(tokio::test)]
 async fn wait_for_tree_scan() -> anyhow::Result<()> {
-    let (manager, _store, clock, _tx) =
+    let (manager_ctx, _store, clock, _tx) =
         test_manager(WatcherState::default(), StoreState::default());
 
     // Not a very deep test: we just confirm that when there is nothing
     // to scan, we wait until the next round.
     let handle = clock.wait("tree_scan").await;
     assert_eq!(handle.delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
-    manager.shutdown().await?;
+    manager_ctx.manager.shutdown();
+    manager_ctx.handle.await??;
 
     Ok(())
 }
@@ -43,34 +44,48 @@ async fn detect_rescans_needed() -> anyhow::Result<()> {
     // the first one.
     store.next_scan = t(10);
 
-    let (manager, store_state, clock, _tx) = test_manager(WatcherState::default(), store);
+    let (manager_ctx, store_state, clock, _tx) = test_manager(WatcherState::default(), store);
 
-    manager.set_roots(vec![Path::new("/a").into()]).await?;
+    manager_ctx
+        .manager
+        .set_roots(vec![Path::new("/a").into()])
+        .await?;
     clock.wait("tree_scan").await;
     let sc1 = store_state.lock().unwrap().scan_round;
 
-    manager.set_roots(vec![Path::new("/a").into()]).await?;
+    manager_ctx
+        .manager
+        .set_roots(vec![Path::new("/a").into()])
+        .await?;
     clock.wait("tree_scan").await;
     let sc2 = store_state.lock().unwrap().scan_round;
 
-    manager.set_roots(vec![Path::new("/b").into()]).await?;
+    manager_ctx
+        .manager
+        .set_roots(vec![Path::new("/b").into()])
+        .await?;
     clock.wait("tree_scan").await;
     let sc3 = store_state.lock().unwrap().scan_round;
 
     assert_eq!(sc1, sc2); // no new scan
     assert_ne!(sc2, sc3); // new root -> new scan.
 
-    manager.shutdown().await?;
+    manager_ctx.manager.shutdown();
+    manager_ctx.handle.await??;
     Ok(())
 }
 
 #[test(tokio::test)]
 async fn set_roots() -> anyhow::Result<()> {
-    let (manager, store_state, _clock, _tx) =
+    let (manager_ctx, store_state, _clock, _tx) =
         test_manager(WatcherState::default(), StoreState::default());
 
-    manager.set_roots(vec![Path::new("/a").into()]).await?;
-    manager.shutdown().await?;
+    manager_ctx
+        .manager
+        .set_roots(vec![Path::new("/a").into()])
+        .await?;
+    manager_ctx.manager.shutdown();
+    manager_ctx.handle.await??;
 
     let inner = store_state.lock().unwrap();
     assert_eq!(inner.roots, vec![Path::new("/a")]);
@@ -86,7 +101,7 @@ fn test_manager(
     watcher_state: WatcherState,
     store_state: StoreState,
 ) -> (
-    FileManager,
+    FileManagerContext,
     Arc<Mutex<StoreState>>,
     FakeClockHandler,
     Sender<watcher::Update>,

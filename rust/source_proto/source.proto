@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package epthos.source;
+
+service Source {
+  rpc GetStats(GetStatsRequest) returns (GetStatsReply);
+}
+
+message GetStatsRequest {}
+
+message GetStatsReply {
+  int32 total_file_count = 1;
+}

@@ -34,7 +34,11 @@ mod tests;
 /// The async public API.
 pub struct FileManager {
     tx: Sender<Operation>,
-    handle: JoinHandle<anyhow::Result<()>>,
+}
+
+pub struct FileManagerContext {
+    pub manager: FileManager,
+    pub handle: JoinHandle<anyhow::Result<()>>,
 }
 
 /// Create a production Manager, using the production store, and
@@ -44,7 +48,7 @@ pub fn new(
     db: &Path,
     rand: crypto::SharedRandom,
     datamanager: DataManagerImpl,
-) -> anyhow::Result<FileManager> {
+) -> anyhow::Result<FileManagerContext> {
     let store = Connection::new(db, rand, Timing::default())?;
     let disk = disk::new()?;
     let clock = clock::new();
@@ -59,7 +63,7 @@ impl FileManager {
         clock: C,
         watcher: Box<dyn watcher::Watcher + Send>,
         datamanager: DM,
-    ) -> anyhow::Result<FileManager>
+    ) -> anyhow::Result<FileManagerContext>
     where
         S: Filestore + Send + 'static,
         D: Disk + Send + 'static,
@@ -74,8 +78,8 @@ impl FileManager {
             datamanager,
         };
         let handle = solo::start(f, "FileManager")?;
-        Ok(FileManager {
-            tx: handle.sender,
+        Ok(FileManagerContext {
+            manager: FileManager { tx: handle.sender },
             handle: handle.handle,
         })
     }
@@ -83,13 +87,8 @@ impl FileManager {
     /// Shutdown can be called in parallel with any pending call and will interrupt them,
     /// shutting down the file manager as early as possible.
     #[allow(dead_code)]
-    pub async fn shutdown(self) -> anyhow::Result<()> {
+    pub fn shutdown(self) {
         drop(self.tx);
-        self.handle.await?
-    }
-
-    pub fn monitor(&mut self) -> &mut JoinHandle<anyhow::Result<()>> {
-        &mut self.handle
     }
 
     // set_roots() will update the roots for file scanning. The updated value will be used
