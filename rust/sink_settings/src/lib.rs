@@ -1,6 +1,6 @@
 //! Load and manipulate settings for a Sink.
 use anyhow::Context;
-use settings::{connection, process, server};
+use settings::{client, connection, process, server};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use thiserror::Error;
@@ -12,14 +12,14 @@ pub fn load() -> anyhow::Result<Settings> {
 
 /// All the validated settings.
 pub struct Settings {
-    broker: broker_client::Settings,
+    broker: client::Settings,
     connection: connection::Settings,
     process: process::Settings,
     server: server::Settings,
 }
 
 impl Settings {
-    pub fn broker(&self) -> &broker_client::Settings {
+    pub fn broker(&self) -> &client::Settings {
         &self.broker
     }
 
@@ -74,7 +74,7 @@ impl Builder {
             return Err(ConfigError::MissingField).context("Can't write Sink settings");
         }
         let settings = wire::Settings {
-            broker: broker_client::wire::Settings {
+            broker: client::wire::Settings {
                 name: constants::BROKER_NAME.into(),
                 address: constants::BROKER_ADDRESS.into(),
             },
@@ -121,7 +121,7 @@ mod wire {
     /// Represents the overall configuration data for a Source.
     #[derive(Debug, Deserialize, Serialize)]
     pub struct Settings {
-        pub broker: broker_client::wire::Settings,
+        pub broker: client::wire::Settings,
         pub connection: connection::wire::Settings,
         pub process: process::wire::Settings,
         pub server: server::wire::Settings,
@@ -133,7 +133,7 @@ impl settings::Anchored for Settings {
 
     fn anchor(wire: &Self::Wire, anchor: &settings::Anchor) -> anyhow::Result<Self> {
         Ok(Settings {
-            broker: broker_client::Settings::anchor(&wire.broker, anchor)?,
+            broker: client::Settings::anchor(&wire.broker, anchor)?,
             connection: connection::Settings::anchor(&wire.connection, anchor)?,
             process: process::Settings::anchor(&wire.process, anchor)?,
             server: server::Settings::anchor(&wire.server, anchor)?,

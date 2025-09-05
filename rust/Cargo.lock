@@ -263,10 +263,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "broker_proto",
- "http",
  "mockall",
  "rpcutil",
- "serde",
  "settings",
  "tokio",
  "tonic",
@@ -1909,7 +1907,6 @@ name = "sink_settings"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "broker_client",
  "constants",
  "serde",
  "settings",
@@ -1987,7 +1984,6 @@ name = "source_settings"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "broker_client",
  "constants",
  "serde",
  "settings",

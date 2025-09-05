@@ -4,7 +4,7 @@ use crate::{
     filemanager::{self},
 };
 use anyhow::Context;
-use settings::connection;
+use settings::{client, connection};
 use source_settings::Settings;
 use std::{
     net::SocketAddr,
@@ -17,7 +17,7 @@ pub struct Builder {
     roots: Vec<PathBuf>,
     address: Option<SocketAddr>,
     connection: Option<connection::Info>,
-    broker: Option<broker_client::Settings>,
+    broker: Option<client::Settings>,
     filestore: PathBuf,
     datastore: PathBuf,
     rnd: Option<crypto::SharedRandom>,
@@ -65,7 +65,7 @@ impl Builder {
         self
     }
 
-    pub fn broker(mut self, broker: &broker_client::Settings) -> Builder {
+    pub fn broker(mut self, broker: &client::Settings) -> Builder {
         self.broker = Some((*broker).clone());
         self
     }

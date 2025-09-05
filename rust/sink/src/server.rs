@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use broker_client::Broker;
 use rpcutil::auth::{self, AuthInterceptor};
-use settings::connection;
+use settings::{client, connection};
 use sink_proto::{
     StoreReply, StoreRequest,
     sink_server::{Sink, SinkServer},
@@ -17,14 +17,14 @@ use tonic::{
 pub struct Server {
     address: SocketAddr,
     connection: connection::Info,
-    broker: broker_client::Settings,
+    broker: client::Settings,
 }
 
 #[derive(Default)]
 pub struct Builder {
     address: Option<SocketAddr>,
     broker_connection: Option<connection::Info>,
-    broker: Option<broker_client::Settings>,
+    broker: Option<client::Settings>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -57,7 +57,7 @@ impl Builder {
         self
     }
 
-    pub fn broker(mut self, broker: &broker_client::Settings) -> Builder {
+    pub fn broker(mut self, broker: &client::Settings) -> Builder {
         self.broker = Some((*broker).clone());
         self
     }

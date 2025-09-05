@@ -245,6 +245,49 @@ pub mod server {
     }
 }
 
+/// Common settings used by clients.
+pub mod client {
+    use super::*;
+    use std::str::FromStr;
+    use tonic::transport::Uri;
+
+    #[derive(Debug, Clone)]
+    pub struct Settings {
+        name: String, // Name of the server on the certificate.
+        address: Uri, // Address of the server.
+    }
+
+    pub mod wire {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Deserialize, Serialize)]
+        pub struct Settings {
+            pub name: String,
+            pub address: String,
+        }
+    }
+
+    impl Settings {
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+        pub fn address(&self) -> &Uri {
+            &self.address
+        }
+    }
+
+    impl Anchored for Settings {
+        type Wire = wire::Settings;
+
+        fn anchor(wire: &Self::Wire, _anchor: &Anchor) -> anyhow::Result<Self> {
+            Ok(Settings {
+                name: wire.name.clone(),
+                address: Uri::from_str(&wire.address)?,
+            })
+        }
+    }
+}
+
 /// A ConfigPath represents a path _inside_ the config directory, for things
 /// like the encryption key, the database, etc.
 #[derive(Serialize, Deserialize, Debug)]

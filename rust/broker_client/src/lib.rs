@@ -1,10 +1,8 @@
 use anyhow::Context;
-use broker_proto::{broker_client::BrokerClient, CheckinReply, CheckinRequest};
-use http::Uri;
+use broker_proto::{CheckinReply, CheckinRequest, broker_client::BrokerClient};
 use mockall::automock;
 use rpcutil::{Backoff, ExpBackoff};
-use settings::connection;
-use std::str::FromStr;
+use settings::{client, connection};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -32,7 +30,10 @@ pub struct SinkLocation {
 
 /// Create a new Broker client. The client immediately starts performing checkins, and expects that
 /// |checkin()| is regularly awaited.
-pub async fn new(client: &connection::Info, server: &Settings) -> anyhow::Result<BrokerImpl> {
+pub async fn new(
+    client: &connection::Info,
+    server: &client::Settings,
+) -> anyhow::Result<BrokerImpl> {
     let tls = ClientTlsConfig::new()
         .domain_name(server.name())
         .ca_certificate(client.peer_root().clone())
@@ -64,41 +65,6 @@ impl SinkLocation {
     }
 }
 
-pub mod wire {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Deserialize, Serialize)]
-    pub struct Settings {
-        pub name: String,
-        pub address: String,
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Settings {
-    name: String,
-    address: Uri,
-}
-
-impl Settings {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub fn address(&self) -> &Uri {
-        &self.address
-    }
-}
-
-impl settings::Anchored for Settings {
-    type Wire = wire::Settings;
-
-    fn anchor(wire: &Self::Wire, _anchor: &settings::Anchor) -> anyhow::Result<Self> {
-        Ok(Settings {
-            name: wire.name.clone(),
-            address: Uri::from_str(&wire.address)?,
-        })
-    }
-}
 #[async_trait]
 impl Broker for BrokerImpl {
     async fn get_peers(&self) -> anyhow::Result<Arc<Vec<SinkLocation>>> {
@@ -230,7 +196,7 @@ mod test {
     use std::result::Result;
 
     use broker_proto::broker_server;
-    use rpcutil::testing::{self, tracking_sleeper, CannedResponses};
+    use rpcutil::testing::{self, CannedResponses, tracking_sleeper};
     use tonic::{Request, Response, Status};
 
     use broker_proto::CheckinReply;

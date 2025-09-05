@@ -8,7 +8,6 @@ publish = false
 doctest = false
 
 [dependencies]
-broker_client = { path = "../broker_client" }
 constants = { path = "../constants" }
 settings = { path = "../settings" }
 
