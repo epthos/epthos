@@ -1971,6 +1971,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "source_client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mockall",
+ "settings",
+ "source_proto",
+ "tonic",
+]
+
+[[package]]
 name = "source_proto"
 version = "0.1.0"
 dependencies = [

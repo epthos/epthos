@@ -1,0 +1,16 @@
+[package]
+name = "source_client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+source_proto = {path = "../source_proto"}
+settings = { path = "../settings" }
+
+anyhow = "1"
+mockall = "0"
+tonic = { version = "0", features = ["tls-ring"] }

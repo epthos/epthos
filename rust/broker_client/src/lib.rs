@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 use tonic::async_trait;
 use tonic::transport::{Channel, ClientTlsConfig};
 
-#[automock]
+#[automock] // The mock is intentionally public for users of the client.
 #[async_trait]
 pub trait Broker {
     /// Get the list of peers known to the Broker. This can be empty if the Broker has not yet received

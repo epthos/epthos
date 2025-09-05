@@ -15,6 +15,7 @@ members = [
     "rpcutil",
     "settings",
     "source",
+    "source_client",
     "source_proto",
     "source_settings",
     "sink",
@@ -22,7 +23,7 @@ members = [
     "sink_proto", 
     "sink_settings", 
     "storage", 
-    "testcerts", 
+    "testcerts",
 ]
 resolver = "2"
 
