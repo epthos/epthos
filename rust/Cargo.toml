@@ -5,6 +5,7 @@ members = [
     "broker_client",
     "broker_proto",
     "cli",
+    "cli_settings",
     "constants",
     "crypto",
     "data_proto",

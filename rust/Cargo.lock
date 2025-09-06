@@ -392,6 +392,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cli_settings",
  "crypto",
  "settings",
  "sink_settings",
@@ -400,6 +401,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "cli_settings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "constants",
+ "serde",
+ "settings",
+ "strum",
+ "strum_macros",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

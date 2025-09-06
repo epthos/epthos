@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use crypto::{self, model, RandomApi};
+use crypto::{self, RandomApi, model};
+use settings::process;
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -36,6 +37,18 @@ enum Commands {
         cert: String,
         #[arg(short, long, required=true, num_args=1..)]
         root: Vec<PathBuf>,
+        #[arg(short, long)]
+        overwrite: bool,
+    },
+    Client {
+        #[arg(short, long)]
+        key: String,
+        #[arg(short, long)]
+        cert: String,
+        #[arg(short, long)]
+        name: String,
+        #[arg(short, long)]
+        address: String,
         #[arg(short, long)]
         overwrite: bool,
     },
@@ -184,6 +197,29 @@ fn source(
         .save(&anchor)
 }
 
+fn client(
+    keyfile: &str,
+    certfile: &str,
+    name: &str,
+    address: &str,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    let anchor = settings::get_anchor(None)?;
+    let path = cli_settings::Builder::path(&anchor);
+    if path.exists() && !overwrite {
+        Err(Error::AlreadyExists(path))?;
+    }
+
+    let key = std::fs::read_to_string(keyfile)?;
+    let cert = std::fs::read_to_string(certfile)?;
+    cli_settings::Builder::default()
+        .certificate(cert)
+        .private_key(key)
+        .name(name)
+        .address(address)
+        .save(&anchor)
+}
+
 fn get_source_key(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::Keys> {
     let durable = crypto::key::Durable::from_file(path).or_else(|_| {
         let durable = rnd.generate_root_key()?;
@@ -195,7 +231,20 @@ fn get_source_key(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::K
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _guard = settings::process::debug()?;
+    // CLI is responsible for setting up its own settings, so we can't just
+    // consider its absence an error.
+
+    let (_settings, _guard) = match cli_settings::load() {
+        Ok(settings) => {
+            let guard = process::init(settings.process())?;
+            (Some(settings), guard)
+        }
+        Err(err) => {
+            let guard = process::debug()?;
+            tracing::info!("failed to load config: {}", err);
+            (None, guard)
+        }
+    };
 
     let args = Args::parse();
 
@@ -217,6 +266,15 @@ async fn main() -> anyhow::Result<()> {
             overwrite,
         } => {
             source(&key, &cert, root, overwrite)?;
+        }
+        Commands::Client {
+            key,
+            cert,
+            name,
+            address,
+            overwrite,
+        } => {
+            client(&key, &cert, &name, &address, overwrite)?;
         }
         Commands::Backup { key, path, out } => {
             backup(path, &fp, &rnd, &get_source_key(&key, &rnd)?, out).await?;

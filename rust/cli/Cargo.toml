@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+cli_settings = { path = "../cli_settings" }
 crypto = { path = "../crypto" }
 settings = { path = "../settings" }
 sink_settings = { path = "../sink_settings" }

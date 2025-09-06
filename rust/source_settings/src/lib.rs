@@ -280,9 +280,8 @@ impl settings::Anchored for Datastore {
 
 #[cfg(test)]
 mod test {
-    use std::net::SocketAddr;
-
     use super::*;
+    use std::net::SocketAddr;
     use tempfile::TempDir;
 
     #[test]

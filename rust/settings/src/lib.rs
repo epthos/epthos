@@ -186,7 +186,8 @@ pub mod process {
     }
 
     /// Initializes the process with the provided settings.
-    pub fn init(settings: &Settings) -> anyhow::Result<Option<impl Drop>> {
+    #[allow(dyn_drop)]
+    pub fn init(settings: &Settings) -> anyhow::Result<Option<Box<dyn Drop>>> {
         let logging = tracing_subscriber::fmt::layer()
             .with_thread_ids(true)
             .with_filter(settings.trace_level());
@@ -197,13 +198,14 @@ pub mod process {
                 .with(logging)
                 .with(flame_layer)
                 .init();
-            return Ok(Some(guard));
+            return Ok(Some(Box::new(guard)));
         }
         tracing_subscriber::registry().with(logging).init();
         Ok(None)
     }
 
-    pub fn debug() -> anyhow::Result<Option<impl Drop>> {
+    #[allow(dyn_drop)]
+    pub fn debug() -> anyhow::Result<Option<Box<dyn Drop>>> {
         init(&Settings {
             level: LevelFilter::TRACE,
         })
