@@ -112,7 +112,7 @@ fn test_manager(
     let (tx, rx) = mpsc::channel(1);
     let (backup_tx, backup_rx) = mpsc::channel(1);
 
-    let manager = FileManager::new(
+    let manager = FileManager::create(
         FakeStore::new(store_state.clone()),
         FakeDisk::new(),
         clock,

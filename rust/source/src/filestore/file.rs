@@ -389,16 +389,17 @@ pub fn matching_egroup(
 }
 
 pub fn stats(txn: &Transaction) -> anyhow::Result<Stats> {
-    let mut stats = Stats::default();
-    stats.total_file_count = txn
-        .query_row(
-            r#"
+    let stats = Stats {
+        total_file_count: txn
+            .query_row(
+                r#"
             SELECT COUNT(*) FROM File
         "#,
-            rusqlite::named_params! {},
-            |row| Ok(row.get(0)?),
-        )
-        .context("computing stats")?;
+                rusqlite::named_params! {},
+                |row| row.get(0),
+            )
+            .context("computing stats")?,
+    };
     Ok(stats)
 }
 

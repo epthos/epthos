@@ -42,14 +42,16 @@ impl WatcherImpl {
         rx: std::sync::mpsc::Receiver<notify::Result<Event>>,
     ) -> Self {
         let (async_tx, async_rx) = mpsc::channel(1);
-        tokio::task::spawn_blocking(move || loop {
-            match rx.recv() {
-                Ok(msg) => match msg {
-                    Ok(event) => {
-                        let update = map_update(&event);
-                        tracing::debug!("notify event: {:?} -> {:?}", &event, &update);
-                        if let Some(update) = update {
-                            if let Err(err) = async_tx.blocking_send(update) {
+        tokio::task::spawn_blocking(move || {
+            loop {
+                match rx.recv() {
+                    Ok(msg) => match msg {
+                        Ok(event) => {
+                            let update = map_update(&event);
+                            tracing::debug!("notify event: {:?} -> {:?}", &event, &update);
+                            if let Some(update) = update
+                                && let Err(err) = async_tx.blocking_send(update)
+                            {
                                 tracing::info!(
                                     "failed to send from WatcherImpl's copier: {:?}",
                                     err
@@ -57,14 +59,14 @@ impl WatcherImpl {
                                 break;
                             }
                         }
-                    }
+                        Err(err) => {
+                            tracing::info!("notifier failed to return event: {:?}", err);
+                        }
+                    },
                     Err(err) => {
-                        tracing::info!("notifier failed to return event: {:?}", err);
+                        tracing::info!("failed to receive from WatcherImpl's copier: {:?}", err);
+                        break;
                     }
-                },
-                Err(err) => {
-                    tracing::info!("failed to receive from WatcherImpl's copier: {:?}", err);
-                    break;
                 }
             }
         });

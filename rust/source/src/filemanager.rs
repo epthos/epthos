@@ -53,11 +53,11 @@ pub fn new(
     let disk = disk::new()?;
     let clock = clock::new();
 
-    FileManager::new(store, disk, clock, watcher::new()?, datamanager)
+    FileManager::create(store, disk, clock, watcher::new()?, datamanager)
 }
 
 impl FileManager {
-    fn new<S, D, C, DM>(
+    fn create<S, D, C, DM>(
         store: S,
         disk: D,
         clock: C,

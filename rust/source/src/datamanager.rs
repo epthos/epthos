@@ -191,7 +191,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                                 pending.push_front(PendingBackup{path, tx: bk_tx});
                                 remaining -= 1;
                             }
-                            if let Err(_) = op_tx.send(response) {
+                            if  op_tx.send(response).is_err() {
                                 bail!("peer died");
                             }
                         },

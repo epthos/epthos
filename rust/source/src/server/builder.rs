@@ -43,7 +43,7 @@ pub enum BuilderError {
 impl Builder {
     pub fn settings(self, settings: &Settings) -> Builder {
         self.roots(settings.backup().roots().clone())
-            .address(settings.server().address().clone())
+            .address(*settings.server().address())
             .connection(settings.connection())
             .broker(settings.broker())
             .filestore(settings.filestore().db())
