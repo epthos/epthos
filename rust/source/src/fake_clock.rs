@@ -316,41 +316,31 @@ impl ClockState {
     }
 
     fn process(&mut self, id: &str) {
-        match self.sleepers.remove(id) {
-            None => {}
-            Some(SleepInfo {
-                unblock,
-                state: SleepState::Syncing(sy),
-            }) => {
-                if sy.current >= sy.target {
-                    let _ = sy.waiter.send((sy.current, sy.duration));
-                    // Now that we consumed the waiter, we are back to SleeperOnly.
-                    self.sleepers.insert(
-                        id.to_owned(),
-                        SleepInfo {
-                            unblock,
-                            state: SleepState::SleeperOnly(SleeperOnly {
-                                current: sy.current,
-                                waker: sy.waker,
-                                duration: sy.duration,
-                            }),
-                        },
-                    );
-                } else {
-                    // Reconstruct the destructed value.
-                    self.sleepers.insert(
-                        id.to_owned(),
-                        SleepInfo {
-                            unblock,
-                            state: SleepState::Syncing(sy),
-                        },
-                    );
+        self.sleepers
+            .entry(id.to_owned())
+            .and_modify(|info| match info {
+                // There is only one case we need to handle: the sleeper matches the
+                // expectation of the waiter.
+                SleepInfo {
+                    state: SleepState::Syncing(syncing),
+                    ..
+                } if syncing.current >= syncing.target => {
+                    let sleeper_only = SleeperOnly {
+                        current: syncing.current,
+                        waker: syncing.waker.clone(),
+                        duration: syncing.duration,
+                    };
+                    // Switch the old state so we can own it. This is needed for send to work.
+                    let state =
+                        std::mem::replace(&mut info.state, SleepState::SleeperOnly(sleeper_only));
+                    if let SleepState::Syncing(syncing) = state {
+                        let _ = syncing.waiter.send((syncing.current, syncing.duration));
+                    } else {
+                        panic!("type changed midway");
+                    }
                 }
-            }
-            Some(state) => {
-                self.sleepers.insert(id.to_owned(), state);
-            }
-        };
+                _ => {}
+            });
     }
 }
 
