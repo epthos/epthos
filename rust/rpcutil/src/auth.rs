@@ -14,6 +14,7 @@ pub enum Peer {
     User(User),
     Source(Source),
     Sink(Sink),
+    Cli(Cli),
 }
 
 /// A User represents information about the _person_ behind a set of
@@ -34,6 +35,13 @@ pub struct Source {
 /// storage for Source data.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Sink {
+    pub id: String,
+}
+
+/// A Cli is a process that controls the user's Source or Sink, and provides
+/// the UI or some other service directly controlled by the user.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Cli {
     pub id: String,
 }
 
@@ -148,12 +156,24 @@ impl Sink {
     }
 }
 
+impl Cli {
+    pub fn new<S: Into<String>>(id: S) -> Self {
+        Cli { id: id.into() }
+    }
+
+    /// Get the unique Cli's id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 impl fmt::Display for Peer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Peer::User(user) => write!(f, "User {}", user),
             Peer::Source(source) => write!(f, "Source {}", source),
             Peer::Sink(sink) => write!(f, "Sink {}", sink),
+            Peer::Cli(cli) => write!(f, "Cli {}", cli),
         }
     }
 }
@@ -176,6 +196,12 @@ impl fmt::Display for Source {
     }
 }
 
+impl fmt::Display for Cli {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.id)
+    }
+}
+
 const DOMAIN: &str = ".epthos.net";
 
 /// Converts a Common Name into a Peer.
@@ -189,6 +215,8 @@ fn cn_to_peer<S: Into<String>>(cn: S) -> Result<Peer, AuthError> {
                     Ok(Peer::Sink(Sink::new(cn)))
                 } else if parts[1] == "src" {
                     Ok(Peer::Source(Source::new(cn)))
+                } else if parts[1] == "cli" {
+                    Ok(Peer::Cli(Cli::new(cn)))
                 } else {
                     Err(AuthError::UnexpectedCommonName(cn))
                 }
@@ -273,6 +301,16 @@ Nouhq/IRpbMgKqD5JQiLATr1SX+TAtQwGrzW+JNbPVgScw==
         assert_eq!(
             cn_to_peer(cn)?,
             Peer::Source(Source::new("321.src.epthos.net"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_cli_cn() -> anyhow::Result<()> {
+        let cn = "321.cli.epthos.net";
+        assert_eq!(
+            cn_to_peer(cn)?,
+            Peer::Source(Source::new("321.cli.epthos.net"))
         );
         Ok(())
     }

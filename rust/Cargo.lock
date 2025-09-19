@@ -396,10 +396,12 @@ dependencies = [
  "crypto",
  "settings",
  "sink_settings",
+ "source_proto",
  "source_settings",
  "storage",
  "thiserror",
  "tokio",
+ "tonic",
  "tracing",
 ]
 

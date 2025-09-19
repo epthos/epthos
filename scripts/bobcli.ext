@@ -1,2 +1,3 @@
 basicConstraints=critical,CA:false
 extendedKeyUsage = clientAuth
+subjectAltName=DNS:111.cli.epthos.net

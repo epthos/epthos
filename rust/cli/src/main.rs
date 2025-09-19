@@ -1,7 +1,8 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crypto::{self, RandomApi, model};
-use settings::process;
+use settings::{client, connection, process};
+use source_proto::{GetStatsReply, GetStatsRequest, source_client::SourceClient};
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -9,6 +10,7 @@ use std::{
 use storage::{filesystem, fingerprint, layout};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tonic::transport::{Channel, ClientTlsConfig};
 
 const CHUNK_SIZE: usize = 2usize.pow(10);
 
@@ -52,6 +54,7 @@ enum Commands {
         #[arg(short, long)]
         overwrite: bool,
     },
+    Status,
     Backup {
         /// Key to use.
         #[arg(short, long)]
@@ -191,6 +194,8 @@ fn source(
     let key = std::fs::read_to_string(keyfile)?;
     let cert = std::fs::read_to_string(certfile)?;
     source_settings::Builder::default()
+        // TODO: maybe pick a port based on availability?
+        .address("127.0.0.1:50010")
         .certificate(cert)
         .private_key(key)
         .root(&root)?
@@ -220,6 +225,34 @@ fn client(
         .save(&anchor)
 }
 
+pub async fn source_client(
+    client: &connection::Info,
+    server: &client::Settings,
+) -> anyhow::Result<SourceClient<Channel>> {
+    let tls = ClientTlsConfig::new()
+        .domain_name(server.name())
+        .ca_certificate(client.peer_root().clone())
+        .identity(client.identity().clone());
+    // Connect lazily so that regular retries handle transient issues rather than having to do it
+    // at creation as well.
+    let channel = Channel::builder(server.address().clone())
+        .tls_config(tls.clone())?
+        .connect_lazy();
+
+    Ok(SourceClient::new(channel))
+}
+
+async fn status(source: &client::Settings, info: &connection::Info) -> anyhow::Result<()> {
+    let mut client = source_client(info, source).await?;
+
+    let stats: GetStatsReply = client
+        .get_stats(GetStatsRequest::default())
+        .await?
+        .into_inner();
+    println!("Total file count: {}", &stats.total_file_count);
+    Ok(())
+}
+
 fn get_source_key(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::Keys> {
     let durable = crypto::key::Durable::from_file(path).or_else(|_| {
         let durable = rnd.generate_root_key()?;
@@ -234,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
     // CLI is responsible for setting up its own settings, so we can't just
     // consider its absence an error.
 
-    let (_settings, _guard) = match cli_settings::load() {
+    let (settings, _guard) = match cli_settings::load() {
         Ok(settings) => {
             let guard = process::init(settings.process())?;
             (Some(settings), guard)
@@ -275,6 +308,10 @@ async fn main() -> anyhow::Result<()> {
             overwrite,
         } => {
             client(&key, &cert, &name, &address, overwrite)?;
+        }
+        Commands::Status => {
+            let settings = settings.context("settings are not set yet")?;
+            status(settings.source(), settings.connection().info()).await?;
         }
         Commands::Backup { key, path, out } => {
             backup(path, &fp, &rnd, &get_source_key(&key, &rnd)?, out).await?;
