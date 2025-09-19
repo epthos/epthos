@@ -61,4 +61,4 @@ COPY --from=build /etc/$APP_NAME.toml "${HOME}"
 EXPOSE 50001
 
 # What the container should run when it is started.
-CMD ["/bin/broker", "--home", "${HOME}"]
+CMD ["/bin/broker", "--home", "/home/epthos"]
