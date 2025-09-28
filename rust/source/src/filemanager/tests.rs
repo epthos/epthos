@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     datamanager::{BackupResult, BackupSlot, InFlight},
     disk::ScanEntry,
-    fake_clock::FakeClockHandler,
+    fake_clock::Handler,
     fake_disk::FakeDisk,
     filestore::{self, HashUpdate, Next},
     model::{FileSize, ModificationTime},
@@ -29,8 +29,8 @@ async fn wait_for_tree_scan() -> anyhow::Result<()> {
 
     // Not a very deep test: we just confirm that when there is nothing
     // to scan, we wait until the next round.
-    let handle = clock.wait("tree_scan").await;
-    assert_eq!(handle.delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
+    let delay = clock.wait("tree_scan", 1).await;
+    assert_eq!(delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
     manager_ctx.manager.shutdown();
     manager_ctx.handle.await??;
 
@@ -50,21 +50,21 @@ async fn detect_rescans_needed() -> anyhow::Result<()> {
         .manager
         .set_roots(vec![Path::new("/a").into()])
         .await?;
-    clock.wait("tree_scan").await;
+    clock.wait("tree_scan", 1).await;
     let sc1 = store_state.lock().unwrap().scan_round;
 
     manager_ctx
         .manager
         .set_roots(vec![Path::new("/a").into()])
         .await?;
-    clock.wait("tree_scan").await;
+    clock.wait("tree_scan", 2).await;
     let sc2 = store_state.lock().unwrap().scan_round;
 
     manager_ctx
         .manager
         .set_roots(vec![Path::new("/b").into()])
         .await?;
-    clock.wait("tree_scan").await;
+    clock.wait("tree_scan", 3).await;
     let sc3 = store_state.lock().unwrap().scan_round;
 
     assert_eq!(sc1, sc2); // no new scan
@@ -103,12 +103,12 @@ fn test_manager(
 ) -> (
     FileManagerContext,
     Arc<Mutex<StoreState>>,
-    FakeClockHandler,
+    Handler,
     Sender<watcher::Update>,
 ) {
     let watcher_state = Arc::new(Mutex::new(watcher_state));
     let store_state = Arc::new(Mutex::new(store_state));
-    let (clock, clock_state) = FakeClockHandler::new();
+    let (clock, clock_state) = Handler::new();
     let (tx, rx) = mpsc::channel(1);
     let (backup_tx, backup_rx) = mpsc::channel(1);
 

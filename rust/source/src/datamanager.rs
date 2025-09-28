@@ -222,7 +222,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
 mod tests {
     use super::*;
     use crate::{
-        datamanager::DataManagerImpl, datastore::Datastore, fake_clock::FakeClockHandler,
+        datamanager::DataManagerImpl, datastore::Datastore, fake_clock::Handler,
         fake_disk::FakeDisk,
     };
     use anyhow::Context;
@@ -233,14 +233,14 @@ mod tests {
     #[test(tokio::test)]
     async fn smoke_test() -> anyhow::Result<()> {
         let ds = Datastore::new_in_memory()?;
-        let (clock, clock_state) = FakeClockHandler::new();
+        let (clock, clock_state) = Handler::new();
         let mut dm = DataManagerImpl::new(ds, clock, FakeDisk::new()).await?;
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
 
-        let handle = clock_state.wait("pause").await;
-        assert_eq!(handle.delay, Duration::from_secs(10));
+        let delay = clock_state.wait("pause", 1).await;
+        assert_eq!(delay, Duration::from_secs(10));
 
         if let Err(e) = dm.backup_slots().try_recv() {
             assert_eq!(e, TryRecvError::Empty);
@@ -248,7 +248,7 @@ mod tests {
             panic!("unexpected slot");
         }
         // Pretend the backup completed.
-        handle.done();
+        clock_state.unblock_once("pause");
         let _ = backup_done.await; // we don't expect this to succeed.
 
         let _ = dm.backup_slots().recv().await.context("no slot!")?;
