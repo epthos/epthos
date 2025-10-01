@@ -165,9 +165,15 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                 pending.len()
             );
             tokio::select! {
-                _ = slot_sender.send(BackupSlotImpl { tx: op_sender.clone() }), if remaining > 0 => {
-                    tracing::debug!("sent one slot");
-                    remaining -= 1;
+                permit = slot_sender.reserve(), if remaining > 0 => {
+                    match permit {
+                        Ok(permit) => {
+                            tracing::debug!("sending one slot");
+                            permit.send(BackupSlotImpl { tx: op_sender.clone() });
+                            remaining -= 1;
+                        },
+                        Err(e) => return Err(e).context("receiver is gone"),
+                    }
                 }
                 op = rx.recv() => {
                     tracing::debug!("received Op={:?}", &op);
