@@ -40,6 +40,7 @@ impl Broker for BrokerImpl {
         let mut reply_sinks: Vec<SinkInfo> = vec![];
         match peer {
             Peer::User(_) => {}
+            Peer::Cli(_) => {}
             Peer::Source(source) => {
                 reply_sinks = self.cache.for_source(&source.id);
             }

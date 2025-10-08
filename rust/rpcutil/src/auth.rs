@@ -308,10 +308,7 @@ Nouhq/IRpbMgKqD5JQiLATr1SX+TAtQwGrzW+JNbPVgScw==
     #[test]
     fn parse_cli_cn() -> anyhow::Result<()> {
         let cn = "321.cli.epthos.net";
-        assert_eq!(
-            cn_to_peer(cn)?,
-            Peer::Source(Source::new("321.cli.epthos.net"))
-        );
+        assert_eq!(cn_to_peer(cn)?, Peer::Cli(Cli::new("321.cli.epthos.net")));
         Ok(())
     }
 
