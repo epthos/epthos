@@ -19,6 +19,10 @@ mod fake_clock;
 #[cfg(test)]
 mod fake_disk;
 
+// Get access to static build information so we can log it.
+// This imports release::HUMAN_READABLE.
+include!(concat!(env!("OUT_DIR"), "/built_info.rs"));
+
 // Creates a new Source key and saves it to the specified path.
 fn new_source(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::key::Durable> {
     let durable = rnd.generate_root_key()?;
@@ -31,6 +35,7 @@ fn new_source(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::key::
 async fn main() -> Result<()> {
     let settings = source_settings::load().context("Failed to load the Source settings")?;
     process::init(settings.process())?;
+    tracing::info!("Starting {}", release_info::HUMAN_READABLE);
 
     let rnd = Arc::new(crypto::Random::new());
     // TODO: we should be very conservative about regenerating the key, in case something requires
@@ -46,5 +51,6 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to configure the Source")?;
     server.serve().await.context("Server completed")?;
+    tracing::info!("Clean shutdown complete");
     Ok(())
 }

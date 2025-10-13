@@ -2064,6 +2064,7 @@ dependencies = [
  "async-trait",
  "broker_client",
  "bytes",
+ "chrono",
  "crypto",
  "mockall",
  "notify",
