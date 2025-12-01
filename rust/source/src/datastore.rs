@@ -1,5 +1,10 @@
 //! The datastore is responsible for tracking the content of backup
 //! data.
+//!
+//! Data cannot be backed up all at once, so we need to keep track of
+//! progress in case of interruption. In particular, once a block has
+//! been read, hashed, encrypted, it may still linger around until it
+//! is transmitted.
 
 use crate::sql_model::LocalPath;
 use anyhow::Context;

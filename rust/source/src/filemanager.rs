@@ -245,7 +245,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                                 updater.commit(complete)?;
                             }
                             Err(e) => {
-                                updater.error(e)?;
+                                updater.error(e.into())?;
                             }
                         }
                     }

@@ -1,5 +1,5 @@
 use crate::{
-    disk::{self, Disk},
+    disk::{self, Chunk, Disk, DiskError, Result},
     model::{FileSize, ModificationTime},
 };
 use std::path::Path;
@@ -13,18 +13,29 @@ impl FakeDisk {
 }
 
 impl Disk for FakeDisk {
-    fn scan(&self, _path: &Path) -> anyhow::Result<disk::ScanIterator> {
+    fn scan(&self, _path: &Path) -> Result<disk::ScanIterator> {
         todo!()
     }
 
-    fn metadata(&self, _path: &Path) -> anyhow::Result<(FileSize, ModificationTime)> {
+    fn metadata(&self, _path: &Path) -> Result<(FileSize, ModificationTime)> {
         todo!()
     }
 
-    fn snapshot(&self, _path: &Path) -> std::io::Result<disk::Snapshot> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "didn't even try",
-        ))
+    fn snapshot(&self, _path: &Path) -> Result<disk::Snapshot> {
+        Err(DiskError::Unsupported("snapshot".into()))
+    }
+
+    fn chunk(&self, _path: &Path) -> Result<impl Iterator<Item = Result<disk::Chunk>>> {
+        Ok(FakeChunkIterator {})
+    }
+}
+
+struct FakeChunkIterator {}
+
+impl Iterator for FakeChunkIterator {
+    type Item = Result<Chunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
     }
 }

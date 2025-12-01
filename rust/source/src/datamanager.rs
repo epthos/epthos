@@ -21,6 +21,9 @@ use tokio::{
     task::JoinHandle,
 };
 
+/// This is the front API, called by the filemanager to trigger backups
+/// when they are needed. The system defines the pushback mechanism, as
+/// backup slots are made available based on the capacity of the datamanager.
 pub trait DataManager {
     type Slot: BackupSlot;
 
@@ -36,7 +39,11 @@ pub trait DataManager {
     async fn shutdown(self) -> anyhow::Result<()>;
 }
 
+/// A BackupSlot is a slot for an additional backup that can be handled by
+/// the system.
 pub trait BackupSlot {
+    /// Enqueue a backup for the specified path. Upon backup completion (either
+    /// successful or not), the oneshot receiver will be triggered with the result.
     async fn enqueue(self, path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>>;
 }
 

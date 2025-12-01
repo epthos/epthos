@@ -3,7 +3,7 @@
 //! This intentionally does _not_ perform any filesystem operations,
 //! to ensure testability and isolation.
 use crate::{
-    disk::{ScanEntry, Snapshot},
+    disk::{DiskError, ScanEntry, Snapshot},
     model::{FileSize, ModificationTime, Stats},
     sql_model::LocalPath,
 };
@@ -173,7 +173,7 @@ pub enum Next<Extra> {
 #[derive(Debug)]
 pub enum HashUpdate {
     Hash(Snapshot),
-    Unreadable(std::io::Error),
+    Unreadable(DiskError),
 }
 
 impl<Extra> Next<Extra> {
