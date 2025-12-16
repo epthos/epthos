@@ -15,7 +15,7 @@ futures = "0"
 http = "1"
 hyper-util = "0"
 rand = "0"
-rustls-pemfile = "2"
+rustls-pki-types = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 tonic = { version = "0", features = ["tls-ring"] }

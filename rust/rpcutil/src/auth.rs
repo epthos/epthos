@@ -234,9 +234,10 @@ fn cn_to_peer<S: Into<String>>(cn: S) -> Result<Peer, AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::BufReader, sync::Arc};
+    use std::sync::Arc;
 
-    use rustls_pemfile::Item;
+    use rustls_pki_types::pem::PemObject;
+    use tonic::transport::CertificateDer;
 
     // TODO: test incorrect certificates
 
@@ -260,13 +261,9 @@ P7NuzZ4SPgwKEeRfkJqQEnM2qlXRbr7hiEViAtOCQFCePuMcAnMLSreRrM2tbSqy
 iIa5s9FrDMIYblYZYL3Vko5rvnTtUcrK41ckvxetCMgWt0sdw7cp6iYvnW8qLuWO
 Nouhq/IRpbMgKqD5JQiLATr1SX+TAtQwGrzW+JNbPVgScw==
 -----END CERTIFICATE-----"#;
-        let mut io = BufReader::new(pem.as_bytes());
-        if let Some(Item::X509Certificate(cert)) = rustls_pemfile::read_one(&mut io)? {
-            let peer = get_peer(&Some(Arc::new(vec![cert])))?;
-            assert_eq!(peer, Peer::User(User::new("bob@example.com")));
-        } else {
-            panic!("failed to parse")
-        }
+        let cert = CertificateDer::from_pem_slice(pem.as_bytes())?;
+        let peer = get_peer(&Some(Arc::new(vec![cert])))?;
+        assert_eq!(peer, Peer::User(User::new("bob@example.com")));
         Ok(())
     }
 
@@ -279,6 +276,7 @@ Nouhq/IRpbMgKqD5JQiLATr1SX+TAtQwGrzW+JNbPVgScw==
     fn reject_missing_certs() {
         assert!(get_peer(&None).is_err());
     }
+
     #[test]
     fn parse_user_cn() -> anyhow::Result<()> {
         assert_eq!(
