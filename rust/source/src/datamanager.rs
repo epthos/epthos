@@ -216,7 +216,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                     let p = pending.pop_back().expect("checked above");
                     self.store.remove(p.path.clone().into())?;
 
-                    let result = match self.disk.snapshot(&p.path) {
+                    let result = match disk::snapshot(&self.disk, &p.path) {
                         Ok(snapshot) => HashUpdate::Hash(snapshot),
                         Err(err) => HashUpdate::Unreadable(err),
                     };

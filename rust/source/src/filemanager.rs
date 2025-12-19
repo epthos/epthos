@@ -194,7 +194,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             match self.store.hash_next(now)? {
                 Next::Next(file, ()) => {
                     tracing::debug!("hashing stale file {:?}", &file);
-                    let update = match self.disk.snapshot(&file) {
+                    let update = match disk::snapshot(&self.disk, &file) {
                         Ok(snapshot) => HashUpdate::Hash(snapshot),
                         Err(err) => HashUpdate::Unreadable(err),
                     };

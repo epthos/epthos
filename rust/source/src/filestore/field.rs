@@ -3,7 +3,7 @@ use crypto::model::EncryptionGroup;
 use rusqlite::types::{self, FromSql, FromSqlError, ToSql, ValueRef};
 use std::time::{Duration, SystemTime};
 
-use crate::model::{FileHash, FileHashConversionError};
+use crate::model::{FileHash, HashConversionError};
 
 /// States a file will go through.
 ///
@@ -214,7 +214,7 @@ impl FromSql for StoredFileHash {
         };
         let hash: FileHash = blob
             .try_into()
-            .map_err(|e: FileHashConversionError| FromSqlError::Other(e.into()))?;
+            .map_err(|e: HashConversionError| FromSqlError::Other(e.into()))?;
         Ok(StoredFileHash(hash))
     }
 }
