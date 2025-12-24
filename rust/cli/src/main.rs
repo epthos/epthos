@@ -267,15 +267,15 @@ async fn main() -> anyhow::Result<()> {
     // CLI is responsible for setting up its own settings, so we can't just
     // consider its absence an error.
 
-    let (settings, _guard) = match cli_settings::load() {
+    let settings = match cli_settings::load() {
         Ok(settings) => {
-            let guard = process::init(settings.process())?;
-            (Some(settings), guard)
+            process::init(settings.process())?;
+            Some(settings)
         }
         Err(err) => {
-            let guard = process::debug()?;
+            process::debug()?;
             tracing::info!("failed to load config: {}", err);
-            (None, guard)
+            None
         }
     };
 

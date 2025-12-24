@@ -1,6 +1,6 @@
 use crate::{
-    disk::{self, Chunk, Disk, DiskError, Result, ScanEntry},
-    model::{FileSize, ModificationTime},
+    disk::{self, Disk, DiskError, Result, ScanEntry},
+    model::{Chunk, FileSize, ModificationTime},
 };
 use std::path::Path;
 
@@ -21,7 +21,7 @@ impl Disk for FakeDisk {
         Err(DiskError::Unsupported("not implemented".into()))
     }
 
-    fn chunk(&self, _path: &Path) -> Result<impl Iterator<Item = Result<disk::Chunk>>> {
+    fn chunk(&self, _path: &Path) -> Result<impl Iterator<Item = Result<Chunk>>> {
         Ok(FakeChunkIterator {})
     }
 }

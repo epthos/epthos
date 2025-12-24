@@ -6,6 +6,14 @@ pub type FileSize = u64;
 /// Modification time, read from the filesystem.
 pub type ModificationTime = SystemTime;
 
+/// File chunk.
+#[derive(Debug, PartialEq)]
+pub struct Chunk {
+    pub data: Vec<u8>,
+    pub offset: usize,
+    pub hash: ChunkHash,
+}
+
 /// Hash of a file, read from the filesystem.
 #[derive(PartialEq, Clone)]
 pub struct FileHash([u8; HASH_SIZE]);
@@ -25,7 +33,29 @@ pub struct Stats {
     pub total_file_count: i32,
 }
 
+pub struct FileHashBuilder {
+    context: ring::digest::Context,
+}
+
 const HASH_SIZE: usize = 32;
+
+impl FileHashBuilder {
+    pub fn new() -> Self {
+        FileHashBuilder {
+            context: ring::digest::Context::new(&ring::digest::SHA256),
+        }
+    }
+
+    pub fn update(&mut self, chunk: &Chunk) {
+        // The FileHash is a series of (offset, ChunkHash).
+        self.context.update(&chunk.offset.to_le_bytes());
+        self.context.update(chunk.hash.as_ref());
+    }
+
+    pub fn finish(self) -> FileHash {
+        self.context.finish().into()
+    }
+}
 
 /// Infaillible conversion from a Digest, as we control which
 /// algorithm we want.

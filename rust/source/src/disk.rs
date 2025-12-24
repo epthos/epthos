@@ -1,5 +1,5 @@
 //! Abstracted disk operations.
-use crate::model::{ChunkHash, FileHash, FileSize, ModificationTime};
+use crate::model::{Chunk, FileHash, FileHashBuilder, FileSize, ModificationTime};
 use std::{
     ffi::OsString,
     io::{ErrorKind, Read},
@@ -36,28 +36,17 @@ pub enum ScanEntry {
     Directory(OsString),
 }
 
-/// File chunk.
-#[derive(Debug, PartialEq)]
-pub struct Chunk {
-    data: Vec<u8>,
-    offset: usize,
-    hash: ChunkHash,
-}
-
 /// Snapshot a file, incl metadata and contents, using the Disk abstractions.
 pub fn snapshot<D: Disk>(disk: &D, path: &Path) -> Result<Snapshot> {
     let (fsize, mtime) = disk.metadata(path)?;
 
-    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut file_hash = FileHashBuilder::new();
     for chunk in disk.chunk(path)? {
-        let chunk = chunk?;
-        // The FileHash is a series of (offset, ChunkHash).
-        hasher.update(&chunk.offset.to_le_bytes());
-        hasher.update(chunk.hash.as_ref());
+        file_hash.update(&chunk?);
     }
 
     Ok(Snapshot {
-        hash: hasher.finish().into(),
+        hash: file_hash.finish(),
         fsize,
         mtime,
     })
@@ -83,6 +72,8 @@ pub type Result<T> = std::result::Result<T, DiskError>;
 
 // Implementation of Disk on top of the actual filesystem.
 mod real {
+    use crate::model::Chunk;
+
     use super::*;
     // This is the only place we expect std::fs to be used.
     use std::fs::{self, DirEntry, File, ReadDir};
