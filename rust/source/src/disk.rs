@@ -72,9 +72,9 @@ pub type Result<T> = std::result::Result<T, DiskError>;
 
 // Implementation of Disk on top of the actual filesystem.
 mod real {
-    use crate::model::Chunk;
-
     use super::*;
+    use crate::model::Chunk;
+    use platform::{Block, Sparse};
     // This is the only place we expect std::fs to be used.
     use std::fs::{self, DirEntry, File, ReadDir};
 
@@ -156,7 +156,10 @@ mod real {
         }
     }
 
-    impl<F: Read> Iterator for ChunkIterator<F> {
+    impl<F> Iterator for ChunkIterator<F>
+    where
+        F: Read + Sparse,
+    {
         type Item = Result<Chunk>;
 
         fn next(&mut self) -> Option<Self::Item> {
@@ -166,6 +169,18 @@ mod real {
             let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
             let mut buffer = vec![0; self.chunk_size];
             let mut start = 0;
+            // Detect whether there is a discontinuity in the file ahead:
+            //   - we don't want to read the hole's zeros
+            //   - we want to resume right after it.
+            let _next = match self
+                .file
+                .next_block(Block::default())
+                .disk(&self.path, "next_block")
+            {
+                Ok(pair) => pair,
+                Err(err) => return Some(Err(err)),
+            };
+
             while start < self.chunk_size - 1 {
                 match self.file.read(&mut buffer[start..]) {
                     Ok(0) => {
@@ -229,7 +244,8 @@ mod real {
             for idx in 0..input.len() {
                 input[idx] = idx as u8;
             }
-            let mut it = ChunkIterator::new(PathBuf::from("fake"), &input[..], 50);
+            let reader = ReadInjector::new(&input[..], |_| Ok(200));
+            let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 50);
             let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
             assert_eq!(
                 c1,
@@ -259,7 +275,8 @@ mod real {
             for idx in 0..input.len() {
                 input[idx] = idx as u8;
             }
-            let mut it = ChunkIterator::new(PathBuf::from("fake"), &input[..], 60);
+            let reader = ReadInjector::new(&input[..], |_| Ok(200));
+            let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 60);
             let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
             assert_eq!(
                 c1,
@@ -361,8 +378,12 @@ mod real {
         // to inject errors, small reads, etc.
         struct ReadInjector<'a, F: Fn(u8) -> std::io::Result<usize>> {
             data: &'a [u8],
+            // Offset in the data.
             offset: usize,
+            // Index of the current read() call.
             iteration: u8,
+            // Function that decides if a read is successful or not based on the
+            // operation's index.
             op: F,
         }
 
@@ -394,6 +415,15 @@ mod real {
                 info!("serving start={} len={}", start, len);
                 (&mut buf[..len]).copy_from_slice(&self.data[start..(start + len)]);
                 Ok(len)
+            }
+        }
+
+        impl<'a, F> Sparse for ReadInjector<'a, F>
+        where
+            F: Fn(u8) -> std::io::Result<usize>,
+        {
+            fn next_block(&mut self, _previous: Block) -> std::io::Result<Block> {
+                Ok(Block::default())
             }
         }
     }

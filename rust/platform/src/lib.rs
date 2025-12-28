@@ -8,7 +8,6 @@ mod shared;
 
 #[cfg(windows)]
 mod win;
-
 #[cfg(windows)]
 use win as platform;
 
@@ -29,6 +28,26 @@ impl TryFrom<LocalPathRepr> for PathBuf {
     fn try_from(path: LocalPathRepr) -> Result<PathBuf, Self::Error> {
         (&path).try_into()
     }
+}
+
+/// Trait that extends reading to sparse objects.
+pub trait Sparse {
+    // Moves the current position of the file to the next available data block
+    // at or after "offset".
+    // Returns the number of bytes part of the current data block, and the offset
+    // to pass to the next call to "next_block()".
+    fn next_block(&mut self, previous: Block) -> std::io::Result<Block>;
+}
+
+/// Details obtained when reading a Sparse object.
+#[derive(Debug, PartialEq, Default)]
+pub struct Block {
+    // Number of bytes skipped as they were part of a hole.
+    pub skipped: usize,
+    // Number of bytes of data from the current position.
+    pub size: usize,
+    // Offset to use for the next call to next_block()
+    pub offset: usize,
 }
 
 #[cfg(test)]

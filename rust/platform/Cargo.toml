@@ -11,6 +11,7 @@ doctest = false
 anyhow = "1"
 tempfile = "3"
 thiserror = "2"
+tracing = "0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0", features = [
@@ -23,4 +24,11 @@ windows = { version = "0", features = [
     "Win32_System_Threading",
 ]}
 windows-core = "0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0"
+errno = "0"
+
+[dev-dependencies]
+test-log = { version = "0", features = ["trace", "color"] }
 
