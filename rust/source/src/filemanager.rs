@@ -497,7 +497,7 @@ impl<O> Future for VecFuture<O> {
 mod vec_futures {
     use crate::filemanager::VecFutures;
     use anyhow::bail;
-    use rand::{TryRngCore, rngs::OsRng};
+    use rand::{TryRng, rngs::SysRng};
     use std::{collections::HashSet, time::Duration};
     use tokio::sync::{
         mpsc,
@@ -532,7 +532,7 @@ mod vec_futures {
             let mut current = 0;
             let mut pending = vec![];
             loop {
-                let can_add = current < total && OsRng.try_next_u32().unwrap() % 2 == 0;
+                let can_add = current < total && SysRng.try_next_u32().unwrap() % 2 == 0;
                 if can_add {
                     tracing::info!("sending item {}", current);
                     let (otx, orx) = oneshot::channel();
@@ -546,7 +546,7 @@ mod vec_futures {
                         }
                         continue;
                     }
-                    let idx = OsRng.try_next_u32().unwrap() as usize % pending.len();
+                    let idx = SysRng.try_next_u32().unwrap() as usize % pending.len();
                     let (otx, value) = pending.remove(idx);
                     tracing::info!("finishing item {}", value);
                     otx.send(value).unwrap();

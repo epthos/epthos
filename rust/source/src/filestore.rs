@@ -11,7 +11,6 @@ use anyhow::{Context, bail};
 use crypto::{SharedRandom, model::EncryptionGroup};
 use field::{StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds};
 use file::{Busy, Clean, Dirty, New, State, Unreadable};
-use rand::{Rng, TryRngCore, rngs::OsRng};
 use rusqlite::Transaction;
 use rusqlite_migration::Migrations;
 use settings::Setting;
@@ -81,7 +80,7 @@ impl Timing {
     fn spread(&self, d: Duration) -> Duration {
         if self.spread > 0.0 {
             // OsRng is fine here, we don't do crypto with the result.
-            d.mul_f64(1f64 + OsRng.unwrap_err().random_range(-self.spread..self.spread))
+            d.mul_f64(1f64 + rand::random_range(-self.spread..self.spread))
         } else {
             d
         }
