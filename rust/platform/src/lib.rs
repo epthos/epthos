@@ -40,7 +40,7 @@ pub trait Sparse {
 }
 
 /// Details obtained when reading a Sparse object.
-#[derive(Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Block {
     // Number of bytes skipped as they were part of a hole.
     pub skipped: usize,

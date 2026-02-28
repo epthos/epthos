@@ -8,10 +8,16 @@ pub type ModificationTime = SystemTime;
 
 /// File chunk.
 #[derive(Debug, PartialEq)]
-pub struct Chunk {
-    pub data: Vec<u8>,
-    pub offset: usize,
-    pub hash: ChunkHash,
+pub enum Chunk {
+    Data {
+        offset: usize,
+        hash: ChunkHash,
+        data: Vec<u8>,
+    },
+    Hole {
+        offset: usize,
+        size: usize,
+    },
 }
 
 /// Hash of a file, read from the filesystem.
@@ -47,9 +53,23 @@ impl FileHashBuilder {
     }
 
     pub fn update(&mut self, chunk: &Chunk) {
-        // The FileHash is a series of (offset, ChunkHash).
-        self.context.update(&chunk.offset.to_le_bytes());
-        self.context.update(chunk.hash.as_ref());
+        // The FileHash is a concatenation of signatures of chunks.
+        match chunk {
+            Chunk::Data {
+                offset,
+                hash,
+                data: _,
+            } => {
+                self.context.update(b"D");
+                self.context.update(&offset.to_le_bytes());
+                self.context.update(hash.as_ref());
+            }
+            Chunk::Hole { offset, size } => {
+                self.context.update(b"H");
+                self.context.update(&offset.to_le_bytes());
+                self.context.update(&size.to_le_bytes());
+            }
+        };
     }
 
     pub fn finish(self) -> FileHash {
