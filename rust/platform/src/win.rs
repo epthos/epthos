@@ -1,22 +1,26 @@
-use crate::shared::{LocalPathRepr, PlatformError};
-use anyhow::{anyhow, Context};
+use crate::{
+    Block, Sparse,
+    shared::{LocalPathRepr, PlatformError},
+};
+use anyhow::{Context, anyhow};
 use std::{
     ffi::c_void,
+    fs::File,
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
 };
 use windows::{
-    core::{Owned, BOOL, HRESULT, PCSTR, PCWSTR, PSTR},
     Win32::{
         Foundation::{HANDLE, HLOCAL},
         Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
             Authorization::{
                 ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorA,
                 GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
             },
-            EqualSid, GetAce, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser,
-            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-            PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+            DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorDacl,
+            GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+            TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::CreateDirectoryW,
         System::{
@@ -25,7 +29,20 @@ use windows::{
             Threading::{GetCurrentProcess, OpenProcessToken},
         },
     },
+    core::{BOOL, HRESULT, Owned, PCSTR, PCWSTR, PSTR},
 };
+
+impl Sparse for File {
+    fn next_block(&mut self, _previous: Block) -> std::io::Result<Block> {
+        // TODO: support sparse windows files.
+        let md = self.metadata()?;
+        Ok(Block {
+            skipped: 0,
+            size: md.len() as usize,
+            offset: 0,
+        })
+    }
+}
 
 // The data area passed to a system call is too small. (0x8007007A)
 const TOO_SMALL: HRESULT = HRESULT::from_win32(0x8007007A);
