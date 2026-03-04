@@ -6,12 +6,16 @@ use anyhow::{Context, anyhow};
 use std::{
     ffi::c_void,
     fs::File,
-    os::windows::ffi::{OsStrExt, OsStringExt},
+    io::Seek,
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::AsRawHandle,
+    },
     path::{Path, PathBuf},
 };
 use windows::{
     Win32::{
-        Foundation::{HANDLE, HLOCAL},
+        Foundation::{ERROR_HANDLE_EOF, ERROR_MORE_DATA, HANDLE, HLOCAL},
         Security::{
             ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
             Authorization::{
@@ -24,6 +28,8 @@ use windows::{
         },
         Storage::FileSystem::CreateDirectoryW,
         System::{
+            IO::DeviceIoControl,
+            Ioctl::{FILE_ALLOCATED_RANGE_BUFFER, FSCTL_QUERY_ALLOCATED_RANGES},
             Memory::LocalAlloc,
             SystemServices::ACCESS_ALLOWED_ACE_TYPE,
             Threading::{GetCurrentProcess, OpenProcessToken},
@@ -33,15 +39,102 @@ use windows::{
 };
 
 impl Sparse for File {
-    fn next_block(&mut self, _previous: Block) -> std::io::Result<Block> {
-        // TODO: support sparse windows files.
+    fn next_block(&mut self, previous: Block) -> std::io::Result<Block> {
         let md = self.metadata()?;
-        Ok(Block {
-            skipped: 0,
-            size: md.len() as usize,
-            offset: 0,
-        })
+        let end = md.len() as usize;
+
+        if previous.offset >= end {
+            return Ok(Block {
+                skipped: 0,
+                size: 0,
+                offset: previous.offset,
+            });
+        }
+
+        match get_next_allocated_range(self, previous.offset, end - previous.offset)? {
+            None => {
+                tracing::debug!("no allocated range found");
+                Ok(Block {
+                    skipped: end - previous.offset,
+                    size: 0,
+                    offset: end,
+                })
+            }
+            Some(range) => {
+                tracing::debug!("allocated range found: {:?}", &range);
+                let start = range.FileOffset as usize;
+                let length = range.Length as usize;
+
+                // Compared to Linux's lseek(SEEK_HOLE), the call above did not change the
+                // position in the file. We must ensure the caller can read the next bytes
+                // when this call returns.
+                self.seek(std::io::SeekFrom::Start(start as u64))?;
+                Ok(Block {
+                    skipped: start - previous.offset,
+                    size: length,
+                    offset: start + length,
+                })
+            }
+        }
     }
+}
+
+// Buffer doesn't hold all the results.
+const MORE_DATA: HRESULT = HRESULT::from_win32(ERROR_MORE_DATA.0);
+// Reached End Of File.
+const EOF: HRESULT = HRESULT::from_win32(ERROR_HANDLE_EOF.0);
+
+// Returns the next allocated block in the provided range. Returns None if there is no
+// allocated block at or after start (but there might still be a hole).
+fn get_next_allocated_range(
+    file: &File,
+    start: usize,
+    len: usize,
+) -> std::io::Result<Option<FILE_ALLOCATED_RANGE_BUFFER>> {
+    let handle = HANDLE(file.as_raw_handle() as *mut c_void);
+    // Query which parts of the file actually have allocated data using
+    // FSCTL_QUERY_ALLOCATED_RANGES IoControl call:
+    // https://learn.microsoft.com/en-us/windows/win32/fileio/sparse-file-operations
+    let mut query = FILE_ALLOCATED_RANGE_BUFFER {
+        FileOffset: start as i64,
+        Length: len as i64,
+    };
+    let mut output: [FILE_ALLOCATED_RANGE_BUFFER; 1] = [FILE_ALLOCATED_RANGE_BUFFER::default(); 1];
+    let mut bytes_returned: u32 = 0;
+
+    let result = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_QUERY_ALLOCATED_RANGES,
+            Some(&mut query as *mut _ as *const _),
+            std::mem::size_of::<FILE_ALLOCATED_RANGE_BUFFER>() as u32,
+            Some(output.as_mut_ptr() as *mut _),
+            std::mem::size_of_val(&output) as u32,
+            Some(&mut bytes_returned),
+            None,
+        )
+    };
+
+    match &result {
+        Ok(_) => {
+            if bytes_returned == 0 {
+                // No allocated ranges at or after previous.offset: it's a hole until EOF.
+                return Ok(None);
+            }
+        }
+        Err(e) => {
+            let code = e.code();
+            if code == EOF {
+                // Treat EOF as a final hole.
+                return Ok(None);
+            }
+            // MORE_DATA is ok, we read allocated blocks one at a time anyways.
+            if code != MORE_DATA {
+                return Err(std::io::Error::from_raw_os_error(code.0 as i32));
+            }
+        }
+    };
+    Ok(Some(output[0]))
 }
 
 // The data area passed to a system call is too small. (0x8007007A)
@@ -329,5 +422,214 @@ impl Castable for PSID {
 impl Castable for PSTR {
     fn raw_ptr(&self) -> *mut c_void {
         self.as_ptr() as *mut _
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        borrow::Cow,
+        fs,
+        io::{Read, Seek, Write},
+        os::windows::io::AsRawHandle,
+    };
+    use test_log::test;
+    use windows::Win32::System::{
+        IO::DeviceIoControl,
+        Ioctl::{FILE_ZERO_DATA_INFORMATION, FSCTL_SET_SPARSE, FSCTL_SET_ZERO_DATA},
+    };
+
+    #[test]
+    fn iterate_over_all_sizes_and_shapes() -> anyhow::Result<()> {
+        let payload = b"1234567890";
+        let only_data = [data(1, payload)];
+        let only_hole = [hole(2)];
+        let hole_data = [hole(1), data(1, payload)];
+
+        let mut data_block = vec![0_u8; BLOCK_SIZE];
+        data_block[..payload.len()].copy_from_slice(&payload[..]);
+        let data_hole = [data(1, data_block.as_slice()), hole(1)];
+
+        for scenario in [
+            &only_data[..],
+            &only_hole[..],
+            &data_hole[..],
+            &hole_data[..],
+        ] {
+            // Each scenario is done in its own temp file.
+            let parent = tempfile::TempDir::new()?;
+            let file = parent.path().join("file");
+            write_sections(&file, scenario)?;
+            let metadata = fs::metadata(&file)?;
+            tracing::info!("{:?} = {} for {:?}", &file, metadata.len(), &scenario);
+
+            let sections = read_sections(&file)?;
+            assert_eq!(scenario, sections.as_slice());
+        }
+
+        Ok(())
+    }
+
+    const BLOCK_SIZE: usize = 65536;
+
+    #[derive(Debug, PartialEq)]
+    struct Section<'a> {
+        tp: SectionType<'a>,
+        blocks: u8,
+    }
+    #[derive(Debug, PartialEq)]
+    enum SectionType<'a> {
+        Hole,
+        Data(Data<'a>),
+    }
+    #[derive(PartialEq)]
+    struct Data<'a> {
+        contents: Cow<'a, [u8]>,
+    }
+    impl<'a> std::fmt::Debug for Data<'a> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Data")
+                .field(
+                    "contents",
+                    &format!("{:?}: {} bytes", &self.contents[..10], self.contents.len()),
+                )
+                .finish()
+        }
+    }
+
+    fn hole(blocks: u8) -> Section<'static> {
+        Section {
+            tp: SectionType::Hole,
+            blocks,
+        }
+    }
+
+    fn data<'a>(blocks: u8, contents: &'a [u8]) -> Section<'a> {
+        Section {
+            tp: SectionType::Data(Data {
+                contents: Cow::Borrowed(contents),
+            }),
+            blocks,
+        }
+    }
+
+    fn owned_data(blocks: u8, contents: Vec<u8>) -> Section<'static> {
+        Section {
+            tp: SectionType::Data(Data {
+                contents: Cow::Owned(contents),
+            }),
+            blocks,
+        }
+    }
+
+    fn read_sections(file: &Path) -> anyhow::Result<Vec<Section<'static>>> {
+        let mut results = vec![];
+        let mut fd = File::open(&file)?;
+        let mut next = fd.next_block(Block::default())?;
+        loop {
+            // next_block moved us to the beginning of a "len"-sized data block.
+            if next.skipped > 0 {
+                results.push(hole((next.skipped / BLOCK_SIZE) as u8));
+            }
+            if next.size == 0 {
+                break;
+            }
+            let mut buf = vec![0_u8; next.size];
+            fd.read_exact(&mut buf)?;
+            let block_count =
+                next.size / BLOCK_SIZE + if next.size % BLOCK_SIZE > 0 { 1 } else { 0 };
+            results.push(owned_data(block_count as u8, buf));
+
+            next = fd.next_block(next)?;
+        }
+
+        Ok(results)
+    }
+
+    fn fallocate(file: &mut File, start: usize, len: usize) -> anyhow::Result<()> {
+        // To reliably create a sparse "hole" as described in
+        // https://learn.microsoft.com/en-us/windows/win32/fileio/sparse-file-operations
+        // we first ensure the region contains non-zero data, then punch it out
+        // with FSCTL_SET_ZERO_DATA. This allows the filesystem to deallocate
+        // the underlying clusters.
+        // file.seek(std::io::SeekFrom::Start(start as u64))?;
+        // let pattern = [0xFFu8; BLOCK_SIZE];
+        // let mut remaining = len;
+        // while remaining > 0 {
+        //     let chunk = std::cmp::min(remaining, pattern.len());
+        //     file.write_all(&pattern[..chunk])?;
+        //     remaining -= chunk;
+        // }
+
+        let handle = HANDLE(file.as_raw_handle() as *mut c_void);
+        let mut zero_data = FILE_ZERO_DATA_INFORMATION {
+            FileOffset: start as i64,
+            BeyondFinalZero: (start + len) as i64,
+        };
+        let mut bytes_returned = 0;
+        unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_SET_ZERO_DATA,
+                Some(&mut zero_data as *mut _ as *const _),
+                std::mem::size_of::<FILE_ZERO_DATA_INFORMATION>() as u32,
+                None,
+                0,
+                Some(&mut bytes_returned),
+                None,
+            )
+        }?;
+        Ok(())
+    }
+
+    fn write_sections(file: &Path, sections: &[Section]) -> anyhow::Result<()> {
+        let mut fd = File::create(&file)?;
+        let handle = HANDLE(fd.as_raw_handle() as *mut c_void);
+        let mut bytes_returned = 0;
+        unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_SET_SPARSE,
+                None,
+                0,
+                None,
+                0,
+                Some(&mut bytes_returned),
+                None,
+            )
+        }?;
+
+        if sections.is_empty() {
+            return Ok(());
+        }
+        let mut offset = 0;
+
+        for section in sections {
+            let start = offset;
+            let len = (section.blocks as usize) * BLOCK_SIZE;
+            offset += len;
+
+            match &section.tp {
+                SectionType::Hole => {
+                    fallocate(&mut fd, start, len)?;
+                }
+                SectionType::Data(Data { contents }) => {
+                    fd.seek(std::io::SeekFrom::Start(start as u64))?;
+                    fd.write_all(contents)?;
+                }
+            }
+        }
+        // In order to finish with a hole, we need to resize the file.
+        let last = &sections[sections.len() - 1];
+        match last.tp {
+            SectionType::Hole => {
+                fd.set_len(offset as u64)?;
+            }
+            SectionType::Data(_) => {}
+        }
+
+        fd.sync_all()?;
+        Ok(())
     }
 }
