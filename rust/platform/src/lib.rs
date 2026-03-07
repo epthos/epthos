@@ -52,7 +52,10 @@ pub struct Block {
 
 #[cfg(test)]
 mod tests {
+    mod sparse;
+
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -119,6 +122,37 @@ mod tests {
         let roundtrip: std::path::PathBuf = local.try_into()?;
 
         assert_eq!(path, roundtrip.as_path());
+        Ok(())
+    }
+
+    #[test]
+    fn iterate_over_all_sizes_and_shapes() -> anyhow::Result<()> {
+        let payload = b"1234567890";
+        let only_data = [sparse::data(1, payload)];
+        let only_hole = [sparse::hole(2)];
+        let hole_data = [sparse::hole(1), sparse::data(1, payload)];
+
+        let mut data_block = vec![0_u8; sparse::BLOCK_SIZE];
+        data_block[..payload.len()].copy_from_slice(&payload[..]);
+        let data_hole = [sparse::data(1, data_block.as_slice()), sparse::hole(1)];
+
+        for scenario in [
+            &only_data[..],
+            &only_hole[..],
+            &data_hole[..],
+            &hole_data[..],
+        ] {
+            // Each scenario is done in its own temp file.
+            let parent = tempfile::TempDir::new()?;
+            let file = parent.path().join("file");
+            sparse::write_sections(&file, scenario)?;
+            let metadata = fs::metadata(&file)?;
+            tracing::info!("{:?} = {} for {:?}", &file, metadata.len(), &scenario);
+
+            let sections = sparse::read_sections(&file)?;
+            assert_eq!(scenario, sections.as_slice());
+        }
+
         Ok(())
     }
 }
