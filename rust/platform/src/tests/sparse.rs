@@ -6,6 +6,11 @@ mod win;
 #[cfg(windows)]
 use win as helpers;
 
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+use unix as helpers;
+
 pub use helpers::read_sections;
 pub use helpers::write_sections;
 
