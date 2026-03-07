@@ -78,47 +78,30 @@ impl Sparse for File {
 
 // Internal error type to ensure we can pass all the useful information around.
 #[derive(Debug, Error)]
-pub enum UnsafeOpError {
+pub(crate) enum UnsafeOpError {
     #[error("lseek({0}, {1}) failure: {2}")]
     LSeek(usize, c_int, errno::Errno),
-    #[cfg(test)]
-    #[error("fallocate({0}, {1}) failure: {2}")]
-    FAllocate(usize, usize, errno::Errno),
 }
 
 impl From<UnsafeOpError> for std::io::Error {
     fn from(value: UnsafeOpError) -> Self {
-        std::io::Error::other(value.to_string())
+        std::io::Error::other(value)
     }
 }
 
-pub fn lseek(file: &mut File, offset: usize, seek_type: c_int) -> Result<usize, UnsafeOpError> {
+pub(crate) fn lseek(
+    file: &mut File,
+    offset: usize,
+    seek_type: c_int,
+) -> Result<usize, UnsafeOpError> {
     let fd = file.as_raw_fd();
-    let result = unsafe { libc::lseek(fd, offset as i64, seek_type as i32) };
+    let result = unsafe { libc::lseek(fd, offset as i64, seek_type) };
 
     if result < 0 {
         let e = errno::errno();
         Err(UnsafeOpError::LSeek(offset, seek_type, e))
     } else {
         Ok(result as usize)
-    }
-}
-
-#[cfg(test)]
-pub fn fallocate(
-    file: &mut File,
-    mode: c_int,
-    start: usize,
-    size: usize,
-) -> Result<(), UnsafeOpError> {
-    use libc::off_t;
-    let fd = file.as_raw_fd();
-    let result = unsafe { libc::fallocate(fd, mode, start as off_t, size as off_t) };
-    if result < 0 {
-        let e = errno::errno();
-        Err(UnsafeOpError::FAllocate(start, size, e))
-    } else {
-        Ok(())
     }
 }
 

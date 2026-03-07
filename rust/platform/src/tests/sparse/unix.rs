@@ -1,15 +1,14 @@
-use crate::{
-    Block, Sparse,
-    unix::{fallocate, lseek},
-};
-
 use super::*;
+use crate::{Block, Sparse, unix::lseek};
 use libc::{FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE, SEEK_SET};
 use std::{
+    ffi::c_int,
     fs::File,
     io::{Read, Write},
+    os::fd::AsRawFd,
     path::Path,
 };
+use thiserror::Error;
 
 pub fn read_sections(file: &Path) -> anyhow::Result<Vec<Section<'static>>> {
     let mut results = vec![];
@@ -74,4 +73,29 @@ pub fn write_sections(file: &Path, sections: &[Section]) -> anyhow::Result<()> {
 
     fd.sync_all()?;
     Ok(())
+}
+
+// Internal error type to ensure we can pass all the useful information around.
+#[derive(Debug, Error)]
+enum UnsafeOpError {
+    #[error("fallocate({0}, {1}) failure: {2}")]
+    FAllocate(usize, usize, errno::Errno),
+}
+
+impl From<UnsafeOpError> for std::io::Error {
+    fn from(value: UnsafeOpError) -> Self {
+        std::io::Error::other(value)
+    }
+}
+
+fn fallocate(file: &mut File, mode: c_int, start: usize, size: usize) -> Result<(), UnsafeOpError> {
+    use libc::off_t;
+    let fd = file.as_raw_fd();
+    let result = unsafe { libc::fallocate(fd, mode, start as off_t, size as off_t) };
+    if result < 0 {
+        let e = errno::errno();
+        Err(UnsafeOpError::FAllocate(start, size, e))
+    } else {
+        Ok(())
+    }
 }
