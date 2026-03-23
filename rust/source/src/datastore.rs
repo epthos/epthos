@@ -64,10 +64,14 @@ impl Datastore {
 
     fn migrations() -> Migrations<'static> {
         Migrations::new(vec![M::up(
+            // "Backup" is the table of active backups.
             r#"
 CREATE TABLE Backup (
-    path BLOB PRIMARY KEY
-) STRICT, WITHOUT ROWID;               
+    path BLOB PRIMARY KEY,
+    next_offset INTEGER, -- Offset in the file to start reading from.
+    next_length INTEGER, -- # of bytes that can be read in the block.
+    next_block  INTEGER  -- Input to next_block.
+) STRICT, WITHOUT ROWID;
             "#,
         )])
     }

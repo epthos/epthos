@@ -2,6 +2,7 @@ use ::settings::process;
 use anyhow::{Context, Result};
 use std::{path::Path, sync::Arc};
 
+mod chunker;
 mod clock;
 mod datamanager;
 mod datastore;

@@ -9,15 +9,16 @@ pub type ModificationTime = SystemTime;
 /// File chunk.
 #[derive(Debug, PartialEq)]
 pub enum Chunk {
+    /// The file contains |data| bytes starting from |offset|.
+    /// The data's hash is provided for validation.
     Data {
         offset: usize,
         hash: ChunkHash,
         data: Vec<u8>,
     },
-    Hole {
-        offset: usize,
-        size: usize,
-    },
+    /// The file contains a hole of |size| zeros starting at
+    /// |offset|.
+    Hole { offset: usize, size: usize },
 }
 
 /// Hash of a file, read from the filesystem.
