@@ -22,7 +22,7 @@ fn file_is_sparse_only() -> Result<()> {
         }],
     );
 
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 50);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 50)?;
     let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
     assert_eq!(
         c1,
@@ -59,7 +59,7 @@ fn file_starts_with_hole() -> Result<()> {
         ],
     );
 
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 50);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 50)?;
     let c = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
     assert_eq!(
         c,
@@ -113,7 +113,7 @@ fn file_ends_with_hole() -> Result<()> {
         ],
     );
 
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 50);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 50)?;
     let c = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
     assert_eq!(
         c,
@@ -159,7 +159,7 @@ fn chunk_file_on_boundary() -> Result<()> {
             offset: 0,
         }],
     );
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 50);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 50)?;
     let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
     assert_eq!(
         c1,
@@ -198,7 +198,7 @@ fn chunk_file_with_different_size() -> Result<()> {
             offset: 0,
         }],
     );
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 60);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 60)?;
     let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
     assert_eq!(
         c1,
@@ -215,6 +215,45 @@ fn chunk_file_with_different_size() -> Result<()> {
             data: input[60..].to_vec(),
             offset: 60,
             hash: ring::digest::digest(&SHA256, &input[60..]).into(),
+        }
+    );
+    assert!(it.next().is_none());
+
+    Ok(())
+}
+
+#[test]
+fn resume_chunking() -> Result<()> {
+    let mut input = [0u8; 100];
+    for idx in 0..input.len() {
+        input[idx] = idx as u8;
+    }
+    let reader = ReadInjector::new(
+        &input[..],
+        |_| Ok(200),
+        vec![Block {
+            skipped: 0,
+            size: 100,
+            offset: 0,
+        }],
+    );
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 10, 60)?;
+    let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
+    assert_eq!(
+        c1,
+        Chunk::Data {
+            data: input[10..70].to_vec(),
+            offset: 10,
+            hash: ring::digest::digest(&SHA256, &input[10..70]).into(),
+        }
+    );
+    let c2 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
+    assert_eq!(
+        c2,
+        Chunk::Data {
+            data: input[70..].to_vec(),
+            offset: 70,
+            hash: ring::digest::digest(&SHA256, &input[70..]).into(),
         }
     );
     assert!(it.next().is_none());
@@ -243,7 +282,7 @@ fn chunk_file_handling_interrupt() -> Result<()> {
             offset: 0,
         }],
     );
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 60);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 60)?;
     let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
     assert_eq!(
         c1,
@@ -276,7 +315,7 @@ fn chunk_file_handling_small_read() -> Result<()> {
             offset: 0,
         }],
     );
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 60);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 60)?;
     let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))??;
     assert_eq!(
         c1,
@@ -312,7 +351,7 @@ fn chunk_file_handling_fatal_error() -> Result<()> {
             offset: 0,
         }],
     );
-    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 60);
+    let mut it = ChunkIterator::new(PathBuf::from("fake"), reader, 0, 60)?;
     let c1 = it.next().ok_or(DiskError::Unsupported("oops".into()))?;
     assert!(c1.is_err());
     assert!(it.next().is_none());
@@ -372,6 +411,22 @@ where
         info!("serving start={} len={}", start, len);
         (&mut buf[..len]).copy_from_slice(&self.data[start..(start + len)]);
         Ok(len)
+    }
+}
+
+impl<'a, F> std::io::Seek for ReadInjector<'a, F>
+where
+    F: Fn(u8) -> std::io::Result<usize>,
+{
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match pos {
+            SeekFrom::Start(offset) => {
+                self.offset = offset as usize;
+            }
+            SeekFrom::End(_) => todo!(),
+            SeekFrom::Current(_) => todo!(),
+        };
+        Ok(self.offset as u64)
     }
 }
 

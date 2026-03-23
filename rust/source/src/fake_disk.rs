@@ -21,7 +21,7 @@ impl Disk for FakeDisk {
         Err(DiskError::Unsupported("not implemented".into()))
     }
 
-    fn chunk(&self, _path: &Path) -> Result<impl Iterator<Item = Result<Chunk>>> {
+    fn chunk(&self, _path: &Path, _offset: usize) -> Result<impl Iterator<Item = Result<Chunk>>> {
         Ok(FakeChunkIterator {})
     }
 }

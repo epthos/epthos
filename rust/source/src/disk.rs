@@ -18,10 +18,10 @@ pub trait Disk {
     /// Fetch the metadata for a file.
     fn metadata(&self, path: &Path) -> Result<(FileSize, ModificationTime)>;
 
-    /// Slice a file into a sequence of chunks. The chunks can't be more than
-    /// CHUNK_SIZE bytes, but can be much shorter if the file is sparse, or for
-    /// the last chunk.
-    fn chunk(&self, path: &Path) -> Result<impl Iterator<Item = Result<Chunk>>>;
+    /// Slice a file into a sequence of chunks, starting at |offset|.
+    /// The chunks can't be more than CHUNK_SIZE bytes, but can be much shorter if
+    /// the file is sparse, or for the last chunk.
+    fn chunk(&self, path: &Path, offset: usize) -> Result<impl Iterator<Item = Result<Chunk>>>;
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +43,7 @@ pub fn snapshot<D: Disk>(disk: &D, path: &Path) -> Result<Snapshot> {
     let (fsize, mtime) = disk.metadata(path)?;
 
     let mut file_hash = FileHashBuilder::new();
-    for chunk in disk.chunk(path)? {
+    for chunk in disk.chunk(path, 0)? {
         file_hash.update(&chunk?);
     }
 

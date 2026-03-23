@@ -6,6 +6,7 @@ use platform::{Block, Sparse};
 use std::{
     cmp::min,
     fs::{self, DirEntry, File, ReadDir},
+    io::{Seek, SeekFrom},
 };
 
 #[cfg(test)]
@@ -27,9 +28,9 @@ impl Disk for RealDisk {
         Ok((md.len(), md.modified().disk(path, "modified")?))
     }
 
-    fn chunk(&self, path: &Path) -> Result<impl Iterator<Item = Result<Chunk>>> {
+    fn chunk(&self, path: &Path, offset: usize) -> Result<impl Iterator<Item = Result<Chunk>>> {
         let file = File::open(path).disk(path, "File::open")?;
-        Ok(ChunkIterator::new(path.to_path_buf(), file, CHUNK_SIZE))
+        ChunkIterator::new(path.to_path_buf(), file, offset, CHUNK_SIZE)
     }
 }
 
@@ -82,17 +83,21 @@ struct ChunkIterator<F: Read> {
     chunk_size: usize,
 }
 
-impl<F: Read> ChunkIterator<F> {
-    fn new(path: PathBuf, file: F, chunk_size: usize) -> Self {
-        ChunkIterator {
+impl<F: Read + Seek> ChunkIterator<F> {
+    fn new(path: PathBuf, mut file: F, offset: usize, chunk_size: usize) -> Result<Self> {
+        if offset > 0 {
+            file.seek(SeekFrom::Start(offset as u64))
+                .disk(&path, "File::seek")?;
+        }
+        Ok(ChunkIterator {
             path,
             file,
-            position: 0,
+            position: offset,
             available: 0,
             block: Block::default(),
             done: false,
             chunk_size,
-        }
+        })
     }
 }
 
