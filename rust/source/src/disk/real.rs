@@ -12,6 +12,7 @@ use std::{
 #[cfg(test)]
 mod test;
 
+#[derive(Clone)]
 pub struct RealDisk {}
 
 impl Disk for RealDisk {

@@ -21,6 +21,19 @@ pub enum Chunk {
     Hole { offset: usize, size: usize },
 }
 
+impl Chunk {
+    pub fn next(&self) -> usize {
+        match self {
+            Chunk::Data {
+                offset,
+                hash: _,
+                data,
+            } => offset + data.len(),
+            Chunk::Hole { offset, size } => offset + size,
+        }
+    }
+}
+
 /// Hash of a file, read from the filesystem.
 #[derive(PartialEq, Clone)]
 pub struct FileHash([u8; HASH_SIZE]);

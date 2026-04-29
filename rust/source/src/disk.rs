@@ -55,7 +55,7 @@ pub fn snapshot<D: Disk>(disk: &D, path: &Path) -> Result<Snapshot> {
 }
 
 /// Create a new instance of the production Disk trait.
-pub fn new() -> anyhow::Result<impl Disk> {
+pub fn new() -> anyhow::Result<impl Disk + Clone + Send> {
     Ok(real::RealDisk {})
 }
 

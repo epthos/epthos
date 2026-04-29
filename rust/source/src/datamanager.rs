@@ -1,6 +1,7 @@
 //! The DataManager performs backup creation.
 
 use crate::{
+    chunker::{Address, ChunkMsg, ChunkOp, Chunker, RealChunker},
     clock::{self, Clock},
     datastore::Datastore,
     disk::{self, Disk},
@@ -75,7 +76,7 @@ impl DataManagerImpl {
     async fn new<C, D>(store: Datastore, clock: C, disk: D) -> anyhow::Result<DataManagerImpl>
     where
         C: Clock + Send + 'static,
-        D: Disk + Send + 'static,
+        D: Disk + Clone + Send + 'static,
     {
         let f = move || Runner { store, clock, disk };
         let handle = solo::start(f, "DataManager")?;
@@ -143,7 +144,7 @@ impl BackupSlot for BackupSlotImpl {
 struct Runner<C, D>
 where
     C: Clock,
-    D: Disk,
+    D: Disk + Clone + Send + 'static,
 {
     store: Datastore,
     clock: C,
@@ -155,10 +156,13 @@ struct PendingBackup {
     tx: oneshot::Sender<BackupResult>,
 }
 
-impl<C: Clock, D: Disk> Solo for Runner<C, D> {
+impl<C: Clock, D: Disk + Clone + Send + 'static> Solo for Runner<C, D> {
     type Operation = Op;
 
     async fn run(self, mut rx: Receiver<Op>) -> anyhow::Result<()> {
+        let chunker = RealChunker::new(self.disk.clone());
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<ChunkOp>(1);
+
         let Some(Op::Init((slot_sender, op_sender))) = rx.recv().await else {
             bail!("Initialization failed");
         };
@@ -193,6 +197,7 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                             tracing::debug!("Enqueuing backup for {:?}", &path);
                             self.store.add(path.clone().into())?;
                             // Enqueue the backup.
+                            chunker.chunk(Address{file:path.clone(), offset:0}, chunk_tx.clone());
                             pending.push_front(PendingBackup{path, tx});
                         },
                         Some(Op::InFlight(op_tx)) => {
@@ -209,6 +214,20 @@ impl<C: Clock, D: Disk> Solo for Runner<C, D> {
                             }
                         },
                         None | Some(Op::Shutdown) => break,
+                    }
+                }
+                op = chunk_rx.recv() => {
+                    match op {
+                        Some(ChunkOp { address: addr, msg: ChunkMsg::Next(_chunk) }) => {
+                            tracing::debug!("chunk offset={} file={:?}", addr.offset, addr.file);
+                        },
+                        Some(ChunkOp { address: addr, msg: ChunkMsg::Done }) => {
+                            tracing::debug!("done chunking {:?} at offset={}", addr.file, addr.offset);
+                        },
+                        Some(ChunkOp { address: addr, msg: ChunkMsg::Error(err) }) => {
+                            tracing::warn!("chunk error at {:?}+{}: {}", addr.file, addr.offset, err);
+                        },
+                        None => unreachable!("chunk_tx held by runner"),
                     }
                 }
                 _ = self.clock.sleep(Duration::from_secs(10), "pause"), if !pending.is_empty() => {

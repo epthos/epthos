@@ -4,6 +4,7 @@ use crate::{
 };
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct FakeDisk {}
 
 impl FakeDisk {
