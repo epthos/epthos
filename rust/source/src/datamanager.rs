@@ -2,17 +2,16 @@
 
 use crate::{
     chunker::{Address, ChunkMsg, ChunkOp, Chunker, RealChunker},
-    clock::{self, Clock},
     datastore::Datastore,
-    disk::{self, Disk},
+    disk::{self, Disk, Snapshot},
     filestore::HashUpdate,
+    model::FileHashBuilder,
     solo::{self, Solo},
 };
 use anyhow::{Context, bail};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use tokio::{
     sync::{
@@ -61,9 +60,8 @@ pub struct InFlight {
 }
 
 pub async fn new(db: &Path) -> anyhow::Result<DataManagerImpl> {
-    let clock = clock::new();
     let disk = disk::new()?;
-    DataManagerImpl::new(Datastore::new(db)?, clock, disk).await
+    DataManagerImpl::new(Datastore::new(db)?, disk).await
 }
 
 pub struct DataManagerImpl {
@@ -73,12 +71,11 @@ pub struct DataManagerImpl {
 }
 
 impl DataManagerImpl {
-    async fn new<C, D>(store: Datastore, clock: C, disk: D) -> anyhow::Result<DataManagerImpl>
+    async fn new<D>(store: Datastore, disk: D) -> anyhow::Result<DataManagerImpl>
     where
-        C: Clock + Send + 'static,
         D: Disk + Clone + Send + 'static,
     {
-        let f = move || Runner { store, clock, disk };
+        let f = move || Runner { store, disk };
         let handle = solo::start(f, "DataManager")?;
         // Get ready to receive backup slots from the runner.
         let (slot_tx, slot_rx) = mpsc::channel(1);
@@ -141,22 +138,21 @@ impl BackupSlot for BackupSlotImpl {
     }
 }
 
-struct Runner<C, D>
+struct Runner<D>
 where
-    C: Clock,
     D: Disk + Clone + Send + 'static,
 {
     store: Datastore,
-    clock: C,
     disk: D,
 }
 
 struct PendingBackup {
     path: PathBuf,
     tx: oneshot::Sender<BackupResult>,
+    hash_builder: FileHashBuilder,
 }
 
-impl<C: Clock, D: Disk + Clone + Send + 'static> Solo for Runner<C, D> {
+impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
     type Operation = Op;
 
     async fn run(self, mut rx: Receiver<Op>) -> anyhow::Result<()> {
@@ -198,15 +194,16 @@ impl<C: Clock, D: Disk + Clone + Send + 'static> Solo for Runner<C, D> {
                             self.store.add(path.clone().into())?;
                             // Enqueue the backup.
                             chunker.chunk(Address{file:path.clone(), offset:0}, chunk_tx.clone());
-                            pending.push_front(PendingBackup{path, tx});
+                            pending.push_front(PendingBackup{path, tx, hash_builder: FileHashBuilder::new()});
                         },
                         Some(Op::InFlight(op_tx)) => {
                             let mut response = vec![];
                             for path in self.store.list()? {
                                 let path : PathBuf = path.try_into()?;
+                                chunker.chunk(Address { file: path.clone(), offset: 0 }, chunk_tx.clone());
                                 let (bk_tx, bk_rx) = oneshot::channel();
                                 response.push(InFlight{path: path.clone(), recv: bk_rx});
-                                pending.push_front(PendingBackup{path, tx: bk_tx});
+                                pending.push_front(PendingBackup{path, tx: bk_tx, hash_builder: FileHashBuilder::new()});
                                 remaining -= 1;
                             }
                             if  op_tx.send(response).is_err() {
@@ -218,31 +215,34 @@ impl<C: Clock, D: Disk + Clone + Send + 'static> Solo for Runner<C, D> {
                 }
                 op = chunk_rx.recv() => {
                     match op {
-                        Some(ChunkOp { address: addr, msg: ChunkMsg::Next(_chunk) }) => {
+                        Some(ChunkOp { address: addr, msg: ChunkMsg::Next(chunk) }) => {
                             tracing::debug!("chunk offset={} file={:?}", addr.offset, addr.file);
+                            if let Some(p) = pending.iter_mut().find(|p| p.path == addr.file) {
+                                p.hash_builder.update(&chunk);
+                            }
                         },
-                        Some(ChunkOp { address: addr, msg: ChunkMsg::Done }) => {
-                            tracing::debug!("done chunking {:?} at offset={}", addr.file, addr.offset);
+                        Some(ChunkOp { address: addr, msg: ChunkMsg::Done(fsize, mtime) }) => {
+                            tracing::debug!("done chunking {:?}", addr.file);
+                            if let Some(idx) = pending.iter().position(|p| p.path == addr.file) {
+                                let p = pending.remove(idx).unwrap();
+                                self.store.remove(p.path.clone().into())?;
+                                let snapshot = Snapshot {
+                                    hash: p.hash_builder.finish(),
+                                    fsize,
+                                    mtime,
+                                };
+                                let result = HashUpdate::Hash(snapshot);
+                                if let Err(result) = p.tx.send(BackupResult { path: p.path, update: result }) {
+                                    bail!("failed to send {:?}", result);
+                                }
+                                remaining += 1;
+                            }
                         },
                         Some(ChunkOp { address: addr, msg: ChunkMsg::Error(err) }) => {
                             tracing::warn!("chunk error at {:?}+{}: {}", addr.file, addr.offset, err);
                         },
                         None => unreachable!("chunk_tx held by runner"),
                     }
-                }
-                _ = self.clock.sleep(Duration::from_secs(10), "pause"), if !pending.is_empty() => {
-                    tracing::debug!("One backup completed");
-                    let p = pending.pop_back().expect("checked above");
-                    self.store.remove(p.path.clone().into())?;
-
-                    let result = match disk::snapshot(&self.disk, &p.path) {
-                        Ok(snapshot) => HashUpdate::Hash(snapshot),
-                        Err(err) => HashUpdate::Unreadable(err),
-                    };
-                    if let Err(result) = p.tx.send(BackupResult{path: p.path, update: result}) {
-                        bail!("failed to send {:?}", result);
-                    }
-                    remaining += 1;
                 }
             }
         }
@@ -254,37 +254,35 @@ impl<C: Clock, D: Disk + Clone + Send + 'static> Solo for Runner<C, D> {
 mod tests {
     use super::*;
     use crate::{
-        datamanager::DataManagerImpl, datastore::Datastore, fake_clock::Handler,
+        datamanager::DataManagerImpl,
+        datastore::Datastore,
         fake_disk::FakeDisk,
+        model::Chunk,
     };
     use anyhow::Context;
     use std::{path::PathBuf, time::Duration};
     use test_log::test;
-    use tokio::sync::mpsc::error::TryRecvError;
 
     #[test(tokio::test)]
     async fn smoke_test() -> anyhow::Result<()> {
         let ds = Datastore::new_in_memory()?;
-        let (clock, clock_state) = Handler::new();
-        let mut dm = DataManagerImpl::new(ds, clock, FakeDisk::new()).await?;
+        let disk = FakeDisk::new();
+        let mut dm = DataManagerImpl::new(ds, disk.clone()).await?;
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
 
-        let delay = clock_state.wait("pause", 1).await;
-        assert_eq!(delay, Duration::from_secs(10));
+        let handle = disk.get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1)).await?;
 
-        if let Err(e) = dm.backup_slots().try_recv() {
-            assert_eq!(e, TryRecvError::Empty);
-        } else {
-            panic!("unexpected slot");
-        }
-        // Pretend the backup completed.
-        clock_state.unblock_once("pause");
-        let _ = backup_done.await; // we don't expect this to succeed.
+        // Feed two chunks, then end iteration.
+        handle.send(Some(Ok(Chunk::Hole { offset: 0, size: 16 })));
+        handle.send(Some(Ok(Chunk::Hole { offset: 16, size: 16 })));
+        handle.send(None);
 
-        let _ = dm.backup_slots().recv().await.context("no slot!")?;
-        tracing::debug!("received");
+        // Backup completes, slot is released.
+        let _ = dm.backup_slots().recv().await.context("no slot after backup")?;
+        let result = backup_done.await?;
+        assert_eq!(result.path, PathBuf::from("/a"));
 
         dm.shutdown().await?;
         Ok(())
