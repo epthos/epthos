@@ -97,7 +97,6 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "Unicode-3.0",
-    "OpenSSL",
     "CC0-1.0",
     "Zlib",
 ]
