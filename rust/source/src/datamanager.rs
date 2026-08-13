@@ -47,23 +47,34 @@ pub trait BackupSlot {
     async fn enqueue(self, path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>>;
 }
 
+/// Overall result for a backup request. When successful, the hash update matches
+/// the hash that would have been computed just by reading the file for a deep
+/// check.
 #[derive(Debug)]
 pub struct BackupResult {
     pub path: PathBuf,
     pub update: HashUpdate,
 }
 
+/// Description of an ongoing backup, returned by DataManager::in_flight to let
+/// the caller get receivers for backups that are still being worked on.
 #[derive(Debug)]
 pub struct InFlight {
     pub path: PathBuf,
     pub recv: oneshot::Receiver<BackupResult>,
 }
 
+/// Create a new production data manager operating on the provided
+/// database path.
 pub async fn new(db: &Path) -> anyhow::Result<DataManagerImpl> {
     let disk = disk::new()?;
     DataManagerImpl::new(Datastore::new(db)?, disk).await
 }
 
+// =============================================================================
+
+// The implementation uses the Solo helper to run the single thread with the db
+// interactions following the actor pattern.
 pub struct DataManagerImpl {
     tx: Sender<Op>,
     handle: JoinHandle<anyhow::Result<()>>,
@@ -112,11 +123,15 @@ impl DataManager for DataManagerImpl {
     }
 }
 
+/// Internal operations supported by the Runner.
 #[derive(Debug)]
 enum Op {
     // Initialize the Runner, which needs to know how to return backup slots.
     Init((Sender<BackupSlotImpl>, Sender<Op>)),
+    // Enqueue a new backup. This is only performed by the backup slot, so the
+    // user of the DataManager trait can't control the parallelism.
     Enqueue(PathBuf, oneshot::Sender<BackupResult>),
+    // Expected once, at startup, to synchronize the state of existing backups.
     InFlight(oneshot::Sender<Vec<InFlight>>),
     // We can't rely on dropping the sender in the manager as we clone it in every
     // backup slot too.
@@ -159,6 +174,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
         let chunker = RealChunker::new(self.disk.clone());
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<ChunkOp>(1);
 
+        // Initial handshake: the handler must call Init.
         let Some(Op::Init((slot_sender, op_sender))) = rx.recv().await else {
             bail!("Initialization failed");
         };
@@ -172,6 +188,8 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                 pending.len()
             );
             tokio::select! {
+                // Try to hand a backup slot to the caller, if there is capacity.
+                // We use reserve() as selecting on send would lose the message.
                 permit = slot_sender.reserve(), if remaining > 0 => {
                     match permit {
                         Ok(permit) => {
@@ -182,6 +200,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                         Err(e) => return Err(e).context("receiver is gone"),
                     }
                 }
+                // Process an incoming request from the handler or any backup slot.
                 op = rx.recv() => {
                     tracing::debug!("received Op={:?}", &op);
                     match op {
@@ -189,6 +208,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                             // This only happens at startup!
                             bail!("Init received after start");
                         },
+                        // A backup slot was consumed to start a new backup.
                         Some(Op::Enqueue(path, tx)) => {
                             tracing::debug!("Enqueuing backup for {:?}", &path);
                             self.store.add(path.clone().into())?;
@@ -196,6 +216,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                             chunker.chunk(Address{file:path.clone(), offset:0}, chunk_tx.clone());
                             pending.push_front(PendingBackup{path, tx, hash_builder: FileHashBuilder::new()});
                         },
+                        // The handler requests the list of in-flight backups.
                         Some(Op::InFlight(op_tx)) => {
                             let mut response = vec![];
                             for path in self.store.list()? {
@@ -210,17 +231,22 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                 bail!("peer died");
                             }
                         },
+                        // End signals: either _all_ senders are gone (incl all slots and
+                        // the handler as well), or we were asked to shut down.
                         None | Some(Op::Shutdown) => break,
                     }
                 }
+                // Handle a chunk from an in-flight backup.
                 op = chunk_rx.recv() => {
                     match op {
+                        // Successfully received a chunk.
                         Some(ChunkOp { address: addr, msg: ChunkMsg::Next(chunk) }) => {
                             tracing::debug!("chunk offset={} file={:?}", addr.offset, addr.file);
                             if let Some(p) = pending.iter_mut().find(|p| p.path == addr.file) {
                                 p.hash_builder.update(&chunk);
                             }
                         },
+                        // File is fully chunked.
                         Some(ChunkOp { address: addr, msg: ChunkMsg::Done(fsize, mtime) }) => {
                             tracing::debug!("done chunking {:?}", addr.file);
                             if let Some(idx) = pending.iter().position(|p| p.path == addr.file) {
@@ -238,7 +264,9 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                 remaining += 1;
                             }
                         },
+                        // IO error while chunking the file.
                         Some(ChunkOp { address: addr, msg: ChunkMsg::Error(err) }) => {
+                            // TODO: this should finish the current slot and propagate the error.
                             tracing::warn!("chunk error at {:?}+{}: {}", addr.file, addr.offset, err);
                         },
                         None => unreachable!("chunk_tx held by runner"),
@@ -254,10 +282,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
 mod tests {
     use super::*;
     use crate::{
-        datamanager::DataManagerImpl,
-        datastore::Datastore,
-        fake_disk::FakeDisk,
-        model::Chunk,
+        datamanager::DataManagerImpl, datastore::Datastore, fake_disk::FakeDisk, model::Chunk,
     };
     use anyhow::Context;
     use std::{path::PathBuf, time::Duration};
@@ -272,15 +297,27 @@ mod tests {
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
 
-        let handle = disk.get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1)).await?;
+        let handle = disk
+            .get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1))
+            .await?;
 
         // Feed two chunks, then end iteration.
-        handle.send(Some(Ok(Chunk::Hole { offset: 0, size: 16 })));
-        handle.send(Some(Ok(Chunk::Hole { offset: 16, size: 16 })));
+        handle.send(Some(Ok(Chunk::Hole {
+            offset: 0,
+            size: 16,
+        })));
+        handle.send(Some(Ok(Chunk::Hole {
+            offset: 16,
+            size: 16,
+        })));
         handle.send(None);
 
         // Backup completes, slot is released.
-        let _ = dm.backup_slots().recv().await.context("no slot after backup")?;
+        let _ = dm
+            .backup_slots()
+            .recv()
+            .await
+            .context("no slot after backup")?;
         let result = backup_done.await?;
         assert_eq!(result.path, PathBuf::from("/a"));
 
