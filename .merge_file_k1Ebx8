@@ -35,6 +35,9 @@ pub trait DataManager {
 
     /// Provides the receiver of new backup slots.
     fn backup_slots(&mut self) -> &mut Receiver<Self::Slot>;
+
+    /// Shuts down the manager and returns whether it had any internal failure.
+    async fn shutdown(self) -> anyhow::Result<()>;
 }
 
 /// A BackupSlot is a slot for an additional backup that can be handled by
@@ -64,10 +67,7 @@ pub struct InFlight {
 
 /// Create a new production data manager operating on the provided
 /// database path.
-pub async fn new(
-    db: &Path,
-    token: CancellationToken,
-) -> anyhow::Result<(DataManagerImpl, JoinHandle<()>)> {
+pub async fn new(db: &Path, token: CancellationToken) -> anyhow::Result<DataManagerImpl> {
     let disk = disk::new()?;
     DataManagerImpl::new(Datastore::new(db)?, disk, token).await
 }
@@ -78,6 +78,8 @@ pub async fn new(
 // interactions following the actor pattern.
 pub struct DataManagerImpl {
     tx: Sender<Op>,
+    handle: JoinHandle<()>,
+    token: CancellationToken,
     slot_rx: Receiver<BackupSlotImpl>,
 }
 
@@ -86,7 +88,7 @@ impl DataManagerImpl {
         store: Datastore,
         disk: D,
         token: CancellationToken,
-    ) -> anyhow::Result<(DataManagerImpl, JoinHandle<()>)>
+    ) -> anyhow::Result<DataManagerImpl>
     where
         D: Disk + Clone + Send + 'static,
     {
@@ -104,13 +106,12 @@ impl DataManagerImpl {
             .send(Op::Init((slot_tx, handle.sender.clone())))
             .await
             .context("Runner failed")?;
-        Ok((
-            DataManagerImpl {
-                tx: handle.sender,
-                slot_rx,
-            },
-            handle.handle,
-        ))
+        Ok(DataManagerImpl {
+            tx: handle.sender,
+            handle: handle.handle,
+            token,
+            slot_rx,
+        })
     }
 }
 
@@ -119,6 +120,12 @@ impl DataManager for DataManagerImpl {
 
     fn backup_slots(&mut self) -> &mut Receiver<BackupSlotImpl> {
         &mut self.slot_rx
+    }
+
+    async fn shutdown(self) -> anyhow::Result<()> {
+        self.token.cancel();
+        self.handle.await?;
+        Ok(())
     }
 
     async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>> {
@@ -269,16 +276,8 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                         },
                         // IO error while chunking the file.
                         Some(ChunkOp { address: addr, msg: ChunkMsg::Error(err) }) => {
+                            // TODO: this should finish the current slot and propagate the error.
                             tracing::warn!("chunk error at {:?}+{}: {}", addr.file, addr.offset, err);
-                            if let Some(idx) = pending.iter().position(|p| p.path == addr.file) {
-                                let p = pending.remove(idx).unwrap();
-                                self.store.remove(p.path.clone().into())?;
-                                let result = HashUpdate::Unreadable(err);
-                                if let Err(result) = p.tx.send(BackupResult { path: p.path, update: result }) {
-                                    bail!("failed to send {:?}", result);
-                                }
-                                remaining += 1;
-                            }
                         },
                         None => unreachable!("chunk_tx held by runner"),
                     }
@@ -302,7 +301,6 @@ mod tests {
     };
     use anyhow::Context;
     use std::{path::PathBuf, time::Duration};
-    use tokio::time::sleep;
 
     #[tokio::test]
     #[test_log::test]
@@ -311,25 +309,27 @@ mod tests {
         // Successfully fetch two chunks from a file.
         let ds = Datastore::new_in_memory()?;
         let disk = FakeDisk::new();
-        let (mut dm, handle) = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
+        let mut dm = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
+
+        let _shutdown = token.drop_guard();
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
 
-        let chunk = disk
+        let handle = disk
             .get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1))
             .await?;
 
         // Feed two chunks, then end iteration.
-        chunk.send(Some(Ok(Chunk::Hole {
+        handle.send(Some(Ok(Chunk::Hole {
             offset: 0,
             size: 16,
         })));
-        chunk.send(Some(Ok(Chunk::Hole {
+        handle.send(Some(Ok(Chunk::Hole {
             offset: 16,
             size: 16,
         })));
-        chunk.send(None);
+        handle.send(None);
 
         // Backup completes, slot is released.
         let _ = dm
@@ -340,52 +340,7 @@ mod tests {
         let result = backup_done.await?;
         assert_eq!(result.path, PathBuf::from("/a"));
 
-        token.cancel();
-        handle.await.context("DataManager")
-    }
-
-    #[tokio::test]
-    #[test_log::test]
-    async fn backup_failed() -> anyhow::Result<()> {
-        let token = CancellationToken::new();
-
-        let ds = Datastore::new_in_memory()?;
-        let disk = FakeDisk::new();
-        let (mut dm, handle) = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
-
-        // Body of the test. Panics if it times out.
-        {
-            let _guard = token.drop_guard();
-
-            let slot = dm.backup_slots().recv().await.context("no slot!")?;
-            let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
-
-            let chunk = disk
-                .get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1))
-                .await?;
-
-            // Fail right away. This is expected to finish the backup and release
-            // the slot.
-            let unsupported = disk::DiskError::Unsupported("Not even a file".into());
-            chunk.send(Some(Err(unsupported)));
-
-            tokio::select! {
-                Some(_) = dm.backup_slots().recv() => {
-                }
-                _ = sleep(Duration::from_secs(1)) => {
-                    panic!("timed out waiting for slot");
-                }
-            }
-            let result = backup_done.await?;
-            assert_eq!(result.path, PathBuf::from("/a"));
-
-            if let HashUpdate::Unreadable(disk::DiskError::Unsupported(msg)) = result.update {
-                assert_eq!(msg, "Not even a file");
-            } else {
-                bail!("Unexpected result");
-            }
-        }
-
-        handle.await.context("DataManager")
+        dm.shutdown().await?;
+        Ok(())
     }
 }

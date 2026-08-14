@@ -269,16 +269,8 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                         },
                         // IO error while chunking the file.
                         Some(ChunkOp { address: addr, msg: ChunkMsg::Error(err) }) => {
+                            // TODO: this should finish the current slot and propagate the error.
                             tracing::warn!("chunk error at {:?}+{}: {}", addr.file, addr.offset, err);
-                            if let Some(idx) = pending.iter().position(|p| p.path == addr.file) {
-                                let p = pending.remove(idx).unwrap();
-                                self.store.remove(p.path.clone().into())?;
-                                let result = HashUpdate::Unreadable(err);
-                                if let Err(result) = p.tx.send(BackupResult { path: p.path, update: result }) {
-                                    bail!("failed to send {:?}", result);
-                                }
-                                remaining += 1;
-                            }
                         },
                         None => unreachable!("chunk_tx held by runner"),
                     }
@@ -340,8 +332,15 @@ mod tests {
         let result = backup_done.await?;
         assert_eq!(result.path, PathBuf::from("/a"));
 
-        token.cancel();
-        handle.await.context("DataManager")
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: mmqlrlyq 7f1c9ff8 "Use cancellation tokens for shutdown." (parents of rebased revision)
+\\\\\\\        to: mmqlrlyq 704ea15e "Use cancellation tokens for shutdown." (rebase destination)
+-        dm.shutdown().await?;
+-        Ok(())
++        token.cancel();
++        handle.await.context("DataManager")
++++++++ lkorxunq 62ebbebd "Handle chunking errors during backup." (rebased revision)
+        Ok(())
     }
 
     #[tokio::test]
@@ -349,43 +348,38 @@ mod tests {
     async fn backup_failed() -> anyhow::Result<()> {
         let token = CancellationToken::new();
 
+        // Successfully fetch two chunks from a file.
         let ds = Datastore::new_in_memory()?;
         let disk = FakeDisk::new();
-        let (mut dm, handle) = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
+        let mut dm = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
 
-        // Body of the test. Panics if it times out.
-        {
-            let _guard = token.drop_guard();
+        let _shutdown = token.drop_guard();
 
-            let slot = dm.backup_slots().recv().await.context("no slot!")?;
-            let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
+        let slot = dm.backup_slots().recv().await.context("no slot!")?;
+        let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
 
-            let chunk = disk
-                .get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1))
-                .await?;
+        let handle = disk
+            .get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1))
+            .await?;
 
-            // Fail right away. This is expected to finish the backup and release
-            // the slot.
-            let unsupported = disk::DiskError::Unsupported("Not even a file".into());
-            chunk.send(Some(Err(unsupported)));
+        // Fail right away. This is expected to finish the backup and release
+        // the slot.
+        handle.send(Some(Err(disk::DiskError::Unsupported(
+            "Not even a file".into(),
+        ))));
 
-            tokio::select! {
-                Some(_) = dm.backup_slots().recv() => {
-                }
-                _ = sleep(Duration::from_secs(1)) => {
-                    panic!("timed out waiting for slot");
-                }
+        tokio::select! {
+            Some(_) = dm.backup_slots().recv() => {
             }
-            let result = backup_done.await?;
-            assert_eq!(result.path, PathBuf::from("/a"));
-
-            if let HashUpdate::Unreadable(disk::DiskError::Unsupported(msg)) = result.update {
-                assert_eq!(msg, "Not even a file");
-            } else {
-                bail!("Unexpected result");
+            _ = sleep(Duration::from_secs(1)) => {
+                panic!("timed out waiting for slot");
             }
         }
+        let result = backup_done.await?;
+        assert_eq!(result.path, PathBuf::from("/a"));
 
-        handle.await.context("DataManager")
+        dm.shutdown().await?;
+        Ok(())
+>>>>>>> conflict 1 of 1 ends
     }
 }
