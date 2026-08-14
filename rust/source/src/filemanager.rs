@@ -27,18 +27,20 @@ use tokio::{
     },
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 mod tests;
 
 /// The async public API.
+#[derive(Clone)]
 pub struct FileManager {
     tx: Sender<Operation>,
 }
 
 pub struct FileManagerContext {
     pub manager: FileManager,
-    pub handle: JoinHandle<anyhow::Result<()>>,
+    pub handle: JoinHandle<()>,
 }
 
 /// Create a production Manager, using the production store, and
@@ -48,12 +50,22 @@ pub fn new(
     db: &Path,
     rand: crypto::SharedRandom,
     datamanager: DataManagerImpl,
+    token: CancellationToken,
 ) -> anyhow::Result<FileManagerContext> {
     let store = Connection::new(db, rand, Timing::default())?;
     let disk = disk::new()?;
     let clock = clock::new();
+    let (watcher, watcher_handle) = watcher::new(token.child_token())?;
 
-    FileManager::create(store, disk, clock, watcher::new()?, datamanager)
+    FileManager::create(
+        store,
+        disk,
+        clock,
+        watcher,
+        watcher_handle,
+        datamanager,
+        token,
+    )
 }
 
 impl FileManager {
@@ -62,7 +74,9 @@ impl FileManager {
         disk: D,
         clock: C,
         watcher: Box<dyn watcher::Watcher + Send>,
+        watcher_handle: JoinHandle<()>,
         datamanager: DM,
+        token: CancellationToken,
     ) -> anyhow::Result<FileManagerContext>
     where
         S: Filestore + Send + 'static,
@@ -75,20 +89,15 @@ impl FileManager {
             disk,
             clock,
             watcher,
+            watcher_handle,
             datamanager,
+            token,
         };
         let handle = solo::start(f, "FileManager")?;
         Ok(FileManagerContext {
             manager: FileManager { tx: handle.sender },
             handle: handle.handle,
         })
-    }
-
-    /// Shutdown can be called in parallel with any pending call and will interrupt them,
-    /// shutting down the file manager as early as possible.
-    #[allow(dead_code)]
-    pub fn shutdown(self) {
-        drop(self.tx);
     }
 
     // set_roots() will update the roots for file scanning. The updated value will be used
@@ -127,7 +136,9 @@ where
     disk: D,
     clock: C,
     watcher: Box<dyn watcher::Watcher + Send>,
+    watcher_handle: JoinHandle<()>,
     datamanager: DM,
+    token: CancellationToken,
 }
 
 fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
@@ -328,9 +339,16 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         },
                     }
                 }
+                _ = self.token.cancelled() => {
+                    tracing::info!("Shutting down");
+                    break;
+                }
+                watcher_result = &mut self.watcher_handle => {
+                    self.token.cancel();
+                    watcher_result.context("Watcher")?;
+                }
             }
         }
-        self.datamanager.shutdown().await?;
         Ok(())
     }
 }

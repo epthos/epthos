@@ -5,8 +5,10 @@ use notify::Event;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 
 /// Public API of a watcher.
 pub trait Watcher {
@@ -23,11 +25,12 @@ pub enum Update {
 }
 
 /// Create a watcher which uses the production components (notify-rs, etc)
-pub fn new() -> anyhow::Result<Box<dyn Watcher + Send>> {
+pub fn new(token: CancellationToken) -> anyhow::Result<(Box<dyn Watcher + Send>, JoinHandle<()>)> {
     let (tx, rx) = std::sync::mpsc::channel();
     let watcher = Box::new(notify::recommended_watcher(tx)?);
 
-    Ok(Box::new(WatcherImpl::new(watcher, rx)))
+    let (watcher, handle) = WatcherImpl::new(watcher, rx, token);
+    Ok((Box::new(watcher), handle))
 }
 
 struct WatcherImpl {
@@ -40,11 +43,15 @@ impl WatcherImpl {
     pub fn new(
         watcher: Box<dyn notify::Watcher + Send>,
         rx: std::sync::mpsc::Receiver<notify::Result<Event>>,
-    ) -> Self {
+        token: CancellationToken,
+    ) -> (Self, JoinHandle<()>) {
         let (async_tx, async_rx) = mpsc::channel(1);
-        tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             loop {
-                match rx.recv() {
+                if token.is_cancelled() {
+                    break;
+                }
+                match rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(msg) => match msg {
                         Ok(event) => {
                             let update = map_update(&event);
@@ -69,12 +76,16 @@ impl WatcherImpl {
                     }
                 }
             }
+            tracing::info!("Shutting down");
         });
-        WatcherImpl {
-            roots: HashSet::new(),
-            watcher,
-            async_rx,
-        }
+        (
+            WatcherImpl {
+                roots: HashSet::new(),
+                watcher,
+                async_rx,
+            },
+            handle,
+        )
     }
 }
 
@@ -201,7 +212,9 @@ mod test {
     where
         O: AsyncOperation + Send + Sync + 'static,
     {
-        let mut w = new()?;
+        let token = CancellationToken::new();
+
+        let (mut w, h) = new(token.clone())?;
         w.set_roots(&[temp.path()])?;
 
         let mut j = tokio::spawn(operation.execute(temp.path().to_path_buf()));
@@ -212,8 +225,13 @@ mod test {
             tokio::select! {
                 event = w.next().recv() => {
                     tracing::info!("event {:?}", event);
-                    if let Some(event) = event {
-                        events.push(event);
+                    match event {
+                        Some(event) => {
+                            events.push(event);
+                        },
+                        None => {
+                            break;
+                        },
                     }
                 }
                 _ = &mut j, if !done => {
@@ -225,6 +243,8 @@ mod test {
                 }
             }
         }
+        token.cancel();
+        h.await?;
         Ok(events)
     }
 }

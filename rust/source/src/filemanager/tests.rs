@@ -24,17 +24,15 @@ use test_log::test;
 
 #[test(tokio::test)]
 async fn wait_for_tree_scan() -> anyhow::Result<()> {
-    let (manager_ctx, _store, clock, _tx) =
+    let (manager_ctx, _store, clock, _tx, token) =
         test_manager(WatcherState::default(), StoreState::default());
 
     // Not a very deep test: we just confirm that when there is nothing
     // to scan, we wait until the next round.
     let delay = clock.wait("tree_scan", 1).await;
     assert_eq!(delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
-    manager_ctx.manager.shutdown();
-    manager_ctx.handle.await??;
 
-    Ok(())
+    shutdown(token, manager_ctx.handle).await
 }
 
 #[test(tokio::test)]
@@ -44,7 +42,8 @@ async fn detect_rescans_needed() -> anyhow::Result<()> {
     // the first one.
     store.next_scan = t(10);
 
-    let (manager_ctx, store_state, clock, _tx) = test_manager(WatcherState::default(), store);
+    let (manager_ctx, store_state, clock, _tx, token) =
+        test_manager(WatcherState::default(), store);
 
     manager_ctx
         .manager
@@ -70,22 +69,19 @@ async fn detect_rescans_needed() -> anyhow::Result<()> {
     assert_eq!(sc1, sc2); // no new scan
     assert_ne!(sc2, sc3); // new root -> new scan.
 
-    manager_ctx.manager.shutdown();
-    manager_ctx.handle.await??;
-    Ok(())
+    shutdown(token, manager_ctx.handle).await
 }
 
 #[test(tokio::test)]
 async fn set_roots() -> anyhow::Result<()> {
-    let (manager_ctx, store_state, _clock, _tx) =
+    let (manager_ctx, store_state, _clock, _tx, token) =
         test_manager(WatcherState::default(), StoreState::default());
 
     manager_ctx
         .manager
         .set_roots(vec![Path::new("/a").into()])
         .await?;
-    manager_ctx.manager.shutdown();
-    manager_ctx.handle.await??;
+    shutdown(token, manager_ctx.handle).await?;
 
     let inner = store_state.lock().unwrap();
     assert_eq!(inner.roots, vec![Path::new("/a")]);
@@ -105,26 +101,33 @@ fn test_manager(
     Arc<Mutex<StoreState>>,
     Handler,
     Sender<watcher::Update>,
+    CancellationToken,
 ) {
     let watcher_state = Arc::new(Mutex::new(watcher_state));
     let store_state = Arc::new(Mutex::new(store_state));
     let (clock, clock_state) = Handler::new();
     let (tx, rx) = mpsc::channel(1);
     let (backup_tx, backup_rx) = mpsc::channel(1);
-
+    let token = CancellationToken::new();
+    let watcher_token = token.clone();
+    let watcher_handle = tokio::task::spawn(async move {
+        watcher_token.cancelled().await;
+    });
     let manager = FileManager::create(
         FakeStore::new(store_state.clone()),
         FakeDisk::new(),
         clock,
         Box::new(FakeWatcher::new(watcher_state.clone(), rx)),
+        watcher_handle,
         FakeDataManager {
             _tx: backup_tx,
             rx: backup_rx,
         },
+        token.clone(),
     )
     .unwrap();
 
-    (manager, store_state, clock_state, tx)
+    (manager, store_state, clock_state, tx, token)
 }
 
 struct FakeDataManager {
@@ -139,10 +142,6 @@ impl DataManager for FakeDataManager {
 
     fn backup_slots(&mut self) -> &mut Receiver<Self::Slot> {
         &mut self.rx
-    }
-
-    async fn shutdown(self) -> anyhow::Result<()> {
-        Ok(())
     }
 
     async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>> {
@@ -313,4 +312,9 @@ impl filestore::Scanner for FakeUpdater {
 
 fn t(s: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(s)
+}
+
+async fn shutdown(token: CancellationToken, handle: JoinHandle<()>) -> anyhow::Result<()> {
+    token.cancel();
+    handle.await.context("thread failed")
 }

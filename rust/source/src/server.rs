@@ -1,6 +1,7 @@
 use self::{builder::Builder, peer::Peer};
 use crate::filemanager::{self, FileManager};
 use anyhow::{Context, Result};
+use error_collection::Errors;
 use rpcutil::auth::AuthInterceptor;
 use settings::connection;
 use source_proto::{
@@ -8,6 +9,8 @@ use source_proto::{
     source_server::{Source, SourceServer},
 };
 use std::{net::SocketAddr, path::PathBuf};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tonic::{
     Response,
     transport::{self, ServerTlsConfig},
@@ -23,22 +26,20 @@ pub struct Server<P: Peer> {
     roots: Vec<PathBuf>,
     _peer: P,
     manager: filemanager::FileManagerContext,
+    token: CancellationToken,
+    dm_handle: JoinHandle<()>,
 }
 
-pub fn builder() -> Builder {
-    Builder::default()
+pub fn builder(token: CancellationToken) -> Builder {
+    Builder::new(token)
 }
 
 impl<P: Peer> Server<P> {
     /// Run the server.
-    pub async fn serve(self) -> Result<()> {
-        let filemanager = self.manager.manager;
-        let filemanager_handle = self.manager.handle;
-
-        // Set up the file store.
-        filemanager.set_roots(self.roots).await?;
-
-        let source_server = SourceImpl { filemanager };
+    pub async fn serve(mut self) -> Result<()> {
+        let source_server = SourceImpl {
+            filemanager: self.manager.manager.clone(),
+        };
         tracing::info!("Listening on {}", &self.address);
         let svc = SourceServer::with_interceptor(source_server, AuthInterceptor::default());
         let server = transport::Server::builder()
@@ -47,20 +48,69 @@ impl<P: Peer> Server<P> {
                     .identity(self.connection.identity().clone())
                     .client_ca_root(self.connection.peer_root().clone()),
             )?
-            .add_service(svc)
-            .serve(self.address);
+            .add_service(svc);
 
-        // We stop the server at the first failure of a submodule, as there is
-        // no real way to continue at the moment.
-        tokio::select! {
-            r = filemanager_handle => {
-                r.context("FileManager thread")?.context("FileManager status")?;
-            },
-            r = server => {
-                r.context("SourceImpl failed")?;
+        let mut server = Box::pin(
+            server
+                // Ensure the server shuts down along with the rest.
+                .serve_with_shutdown(self.address, self.token.child_token().cancelled_owned()),
+        );
+
+        let mut server_result = None;
+        let mut filemanager_result = None;
+        let mut datamanager_result = None;
+        match self.initialize().await {
+            Ok(_) => {
+                // We stop the server at the first failure of a submodule, as there is
+                // no real way to continue at the moment.
+                tokio::select! {
+                    r = &mut self.manager.handle => {
+                        tracing::info!("FileManager died");
+                        // Pull the ripcord lto ensure everything shuts down.
+                        self.token.cancel();
+                        filemanager_result = Some(r);
+                    },
+                    r = &mut self.dm_handle => {
+                        tracing::info!("DataManager died");
+                        // Pull the ripcord lto ensure everything shuts down.
+                        self.token.cancel();
+                        datamanager_result = Some(r);
+                    },
+                    r = &mut server => {
+                        tracing::info!("Server died");
+                        // Pull the ripcord to ensure everything shuts down.
+                        self.token.cancel();
+                        server_result = Some(r.context("SourceImpl"));
+                    }
+                }
             }
+            Err(e) => {
+                tracing::error!("Server init failed: {}", e);
+                self.token.cancel();
+            }
+        };
+        // We can then fill in the results of all the other missing futures.
+        if server_result.is_none() {
+            server_result = Some(server.await.context("Server"));
         }
-        Ok(())
+        if filemanager_result.is_none() {
+            filemanager_result = Some(self.manager.handle.await);
+        }
+        if datamanager_result.is_none() {
+            datamanager_result = Some(self.dm_handle.await);
+        }
+
+        let mut errors = Errors::new();
+        errors.collect(server_result.unwrap());
+        errors.collect(filemanager_result.unwrap());
+        errors.collect(datamanager_result.unwrap());
+        errors.as_result()
+    }
+
+    // All failible initialization goes here so we can safely shut down if any
+    // fails.
+    async fn initialize(&self) -> anyhow::Result<()> {
+        self.manager.manager.set_roots(self.roots.clone()).await
     }
 }
 

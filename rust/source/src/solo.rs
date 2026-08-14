@@ -18,7 +18,7 @@ pub trait Solo {
 
 pub struct Handle<O> {
     pub sender: Sender<O>,
-    pub handle: JoinHandle<anyhow::Result<()>>,
+    pub handle: JoinHandle<()>,
 }
 
 /// Spawn a new thread and start the Solo instance provided by f(). The returned
@@ -39,29 +39,34 @@ where
         .enable_all()
         .build()?;
 
-    let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+    let handle = tokio::task::spawn_blocking(move || -> () {
+        // We let the thread fail altogether in case of issues, so we don't need to
+        // handle two failure cases that are equivalent.
         let (tx, rx) = mpsc::channel::<I::Operation>(1);
         dm_tx
             .send(tx)
-            .context(format!("{}: failed to pass tx back", name))?;
+            .expect(&format!("{}: failed to pass tx back", name));
         let local = LocalSet::new();
 
         rt.block_on(local.run_until(async {
             let async_work = f();
             let handle = local.spawn_local(async move {
                 tracing::info!("{} is starting", name);
-                let result: anyhow::Result<()> = async_work.run(rx).await;
-                match &result {
-                    Ok(_) => {
-                        tracing::info!("{} has shut down", name);
-                    }
-                    Err(err) => {
-                        tracing::error!("{} failed: {:?}", name, err);
-                    }
-                }
-                result
+                async_work.run(rx).await
             });
-            handle.await?
+            // Only one of these ever actually panics: either we resume the
+            // original panic unchanged (no new panic raised, so no risk of
+            // panicking while already unwinding, which would abort the
+            // whole process instead of just failing this thread), or we
+            // raise a single fresh panic from a clean (non-unwinding) result.
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => panic!("Worker {} failed: {:?}", name, err),
+                Err(join_err) if join_err.is_panic() => {
+                    std::panic::resume_unwind(join_err.into_panic())
+                }
+                Err(join_err) => panic!("Worker {} cancelled: {:?}", name, join_err),
+            }
         }))
     });
     let tx = dm_rx

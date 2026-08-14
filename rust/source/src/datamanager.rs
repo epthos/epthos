@@ -20,6 +20,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 /// This is the front API, called by the filemanager to trigger backups
 /// when they are needed. The system defines the pushback mechanism, as
@@ -34,9 +35,6 @@ pub trait DataManager {
 
     /// Provides the receiver of new backup slots.
     fn backup_slots(&mut self) -> &mut Receiver<Self::Slot>;
-
-    /// Shuts down the manager.
-    async fn shutdown(self) -> anyhow::Result<()>;
 }
 
 /// A BackupSlot is a slot for an additional backup that can be handled by
@@ -66,9 +64,12 @@ pub struct InFlight {
 
 /// Create a new production data manager operating on the provided
 /// database path.
-pub async fn new(db: &Path) -> anyhow::Result<DataManagerImpl> {
+pub async fn new(
+    db: &Path,
+    token: CancellationToken,
+) -> anyhow::Result<(DataManagerImpl, JoinHandle<()>)> {
     let disk = disk::new()?;
-    DataManagerImpl::new(Datastore::new(db)?, disk).await
+    DataManagerImpl::new(Datastore::new(db)?, disk, token).await
 }
 
 // =============================================================================
@@ -77,16 +78,24 @@ pub async fn new(db: &Path) -> anyhow::Result<DataManagerImpl> {
 // interactions following the actor pattern.
 pub struct DataManagerImpl {
     tx: Sender<Op>,
-    handle: JoinHandle<anyhow::Result<()>>,
     slot_rx: Receiver<BackupSlotImpl>,
 }
 
 impl DataManagerImpl {
-    async fn new<D>(store: Datastore, disk: D) -> anyhow::Result<DataManagerImpl>
+    async fn new<D>(
+        store: Datastore,
+        disk: D,
+        token: CancellationToken,
+    ) -> anyhow::Result<(DataManagerImpl, JoinHandle<()>)>
     where
         D: Disk + Clone + Send + 'static,
     {
-        let f = move || Runner { store, disk };
+        let runner_token = token.clone();
+        let f = move || Runner {
+            store,
+            disk,
+            token: runner_token,
+        };
         let handle = solo::start(f, "DataManager")?;
         // Get ready to receive backup slots from the runner.
         let (slot_tx, slot_rx) = mpsc::channel(1);
@@ -95,11 +104,13 @@ impl DataManagerImpl {
             .send(Op::Init((slot_tx, handle.sender.clone())))
             .await
             .context("Runner failed")?;
-        Ok(DataManagerImpl {
-            tx: handle.sender,
-            handle: handle.handle,
-            slot_rx,
-        })
+        Ok((
+            DataManagerImpl {
+                tx: handle.sender,
+                slot_rx,
+            },
+            handle.handle,
+        ))
     }
 }
 
@@ -108,12 +119,6 @@ impl DataManager for DataManagerImpl {
 
     fn backup_slots(&mut self) -> &mut Receiver<BackupSlotImpl> {
         &mut self.slot_rx
-    }
-
-    async fn shutdown(self) -> anyhow::Result<()> {
-        let _ = self.tx.send(Op::Shutdown).await;
-        self.handle.await??;
-        Ok(())
     }
 
     async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>> {
@@ -133,9 +138,6 @@ enum Op {
     Enqueue(PathBuf, oneshot::Sender<BackupResult>),
     // Expected once, at startup, to synchronize the state of existing backups.
     InFlight(oneshot::Sender<Vec<InFlight>>),
-    // We can't rely on dropping the sender in the manager as we clone it in every
-    // backup slot too.
-    Shutdown,
 }
 
 pub struct BackupSlotImpl {
@@ -159,6 +161,7 @@ where
 {
     store: Datastore,
     disk: D,
+    token: CancellationToken,
 }
 
 struct PendingBackup {
@@ -231,9 +234,9 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                 bail!("peer died");
                             }
                         },
-                        // End signals: either _all_ senders are gone (incl all slots and
-                        // the handler as well), or we were asked to shut down.
-                        None | Some(Op::Shutdown) => break,
+                        // End signal: _all_ senders are gone (incl all slots and
+                        // the handler as well).
+                        None => break,
                     }
                 }
                 // Handle a chunk from an in-flight backup.
@@ -272,6 +275,11 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                         None => unreachable!("chunk_tx held by runner"),
                     }
                 }
+                // Orderly shutdown requested.
+                _ = self.token.cancelled() => {
+                    tracing::info!("Shutting down");
+                    break;
+                }
             }
         }
         Ok(())
@@ -286,31 +294,33 @@ mod tests {
     };
     use anyhow::Context;
     use std::{path::PathBuf, time::Duration};
-    use test_log::test;
 
-    #[test(tokio::test)]
+    #[tokio::test]
+    #[test_log::test]
     async fn smoke_test() -> anyhow::Result<()> {
+        let token = CancellationToken::new();
+        // Successfully fetch two chunks from a file.
         let ds = Datastore::new_in_memory()?;
         let disk = FakeDisk::new();
-        let mut dm = DataManagerImpl::new(ds, disk.clone()).await?;
+        let (mut dm, handle) = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
 
-        let handle = disk
+        let chunk = disk
             .get_chunk_handle(&PathBuf::from("/a"), Duration::from_secs(1))
             .await?;
 
         // Feed two chunks, then end iteration.
-        handle.send(Some(Ok(Chunk::Hole {
+        chunk.send(Some(Ok(Chunk::Hole {
             offset: 0,
             size: 16,
         })));
-        handle.send(Some(Ok(Chunk::Hole {
+        chunk.send(Some(Ok(Chunk::Hole {
             offset: 16,
             size: 16,
         })));
-        handle.send(None);
+        chunk.send(None);
 
         // Backup completes, slot is released.
         let _ = dm
@@ -321,7 +331,7 @@ mod tests {
         let result = backup_done.await?;
         assert_eq!(result.path, PathBuf::from("/a"));
 
-        dm.shutdown().await?;
-        Ok(())
+        token.cancel();
+        handle.await.context("DataManager")
     }
 }

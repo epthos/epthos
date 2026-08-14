@@ -11,9 +11,11 @@ use std::{
     path::{Path, PathBuf},
 };
 use storage::fingerprint;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 pub struct Builder {
+    token: CancellationToken,
     roots: Vec<PathBuf>,
     address: Option<SocketAddr>,
     connection: Option<connection::Info>,
@@ -41,6 +43,12 @@ pub enum BuilderError {
 }
 
 impl Builder {
+    pub fn new(token: CancellationToken) -> Builder {
+        Builder {
+            token,
+            ..Builder::default()
+        }
+    }
     pub fn settings(self, settings: &Settings) -> Builder {
         self.roots(settings.backup().roots().clone())
             .address(*settings.server().address())
@@ -94,19 +102,20 @@ impl Builder {
         let peer = peer::new(broker, connection.clone());
         let rnd = self.rnd.ok_or(BuilderError::MissingCrypto)?;
         let _source_key = self.source_key.ok_or(BuilderError::MissingCrypto)?;
+        // Use a child token so the datamanager can't cancel the rest
+        // unilaterally.
+        let (dm, dm_handle) = datamanager::new(&self.datastore, self.token.child_token())
+            .await
+            .context("failed to create DataManager")?;
         Ok(Server {
             connection,
             address,
             roots: self.roots,
             _peer: peer,
-            manager: filemanager::new(
-                &self.filestore,
-                rnd,
-                datamanager::new(&self.datastore)
-                    .await
-                    .context("failed to create DataManager")?,
-            )
-            .context("Failed to create FileManager")?,
+            manager: filemanager::new(&self.filestore, rnd, dm, self.token.child_token())
+                .context("Failed to create FileManager")?,
+            token: self.token,
+            dm_handle,
         })
     }
 }

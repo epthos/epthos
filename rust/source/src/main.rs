@@ -1,6 +1,7 @@
 use ::settings::process;
 use anyhow::{Context, Result};
 use std::{path::Path, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 mod chunker;
 mod clock;
@@ -45,13 +46,29 @@ async fn main() -> Result<()> {
         .or_else(|_| new_source(settings.backup().keyfile(), rnd.as_ref()))?;
     let source_key = crypto::Keys::new(durable);
 
-    let server = server::builder()
+    let token = CancellationToken::new();
+    let server = server::builder(token.clone())
         .settings(&settings)
         .crypto(rnd, source_key)
         .build()
         .await
         .context("Failed to configure the Source")?;
-    server.serve().await.context("Server completed")?;
+
+    let mut serving = Box::pin(server.serve()); // Serving Future.
+    loop {
+        tokio::select! {
+            // External shutdown trigger.
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Ctrl-C, shutting down.");
+                token.cancel();
+            }
+            // Shutdown confirmation.
+            done = &mut serving => {
+                done.context("Server completed")?;
+                break;
+            }
+        };
+    }
     tracing::info!("Clean shutdown complete");
     Ok(())
 }

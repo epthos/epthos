@@ -24,7 +24,9 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
+    backtrace::{Backtrace, BacktraceStatus},
     env, fs,
+    panic::PanicHookInfo,
     path::{Path, PathBuf},
 };
 
@@ -197,6 +199,7 @@ pub mod process {
     /// Initializes the process with the provided settings.
     #[allow(dyn_drop)]
     pub fn init(settings: &Settings) -> anyhow::Result<()> {
+        std::panic::set_hook(Box::new(panic_hook));
         let mut layers = Vec::new();
 
         if let Some(ref logfile) = settings.logfile {
@@ -392,6 +395,34 @@ pub fn get_anchor(name: String, default: Option<PathBuf>) -> Result<Anchor, Sett
 
 fn home_override() -> Option<PathBuf> {
     Some(PathBuf::from(env::var("EPTHOS_HOME").ok()?))
+}
+
+fn panic_hook(panic_info: &PanicHookInfo) {
+    let payload = panic_info.payload();
+
+    let payload = if let Some(s) = payload.downcast_ref::<&str>() {
+        Some(&**s)
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        Some(s.as_str())
+    } else {
+        None
+    };
+
+    let location = panic_info.location().map(|l| l.to_string());
+    let (backtrace, note) = {
+        let backtrace = Backtrace::capture();
+        let note = (backtrace.status() == BacktraceStatus::Disabled)
+            .then_some("run with RUST_BACKTRACE=1 environment variable for backtraces");
+        (Some(backtrace), note)
+    };
+
+    tracing::error!(
+        panic.payload = payload,
+        panic.location = location,
+        panic.backtrace = backtrace.map(tracing::field::display),
+        panic.note = note,
+        "Thread panicked",
+    );
 }
 
 #[cfg(windows)]
