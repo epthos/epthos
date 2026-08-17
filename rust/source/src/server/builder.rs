@@ -1,9 +1,10 @@
 use super::{Server, peer};
 use crate::{
     datamanager,
-    filemanager::{self},
+    filemanager::{self, FileManagerContext},
 };
 use anyhow::Context;
+use error_collection::Errors;
 use settings::{client, connection};
 use source_settings::Settings;
 use std::{
@@ -102,20 +103,38 @@ impl Builder {
         let peer = peer::new(broker, connection.clone());
         let rnd = self.rnd.ok_or(BuilderError::MissingCrypto)?;
         let _source_key = self.source_key.ok_or(BuilderError::MissingCrypto)?;
+
+        // -- The following structs require an explicit shutdown ---
+
         // Use a child token so the datamanager can't cancel the rest
         // unilaterally.
         let (dm, dm_handle) = datamanager::new(&self.datastore, self.token.child_token())
             .await
             .context("failed to create DataManager")?;
+        let fm_context = match filemanager::new(&self.filestore, rnd, dm, self.token.child_token())
+            .context("Failed to create FileManager")
+        {
+            Ok(fm) => fm,
+            Err(e) => {
+                self.token.cancel();
+
+                let mut errors = Errors::new();
+                errors.collect(dm_handle.await);
+                errors.collect::<FileManagerContext, anyhow::Error>(Err(e));
+
+                return Err(BuilderError::UnknownError(
+                    errors.as_result().context("Builder failed").unwrap_err(),
+                ));
+            }
+        };
         Ok(Server {
             connection,
             address,
             roots: self.roots,
             _peer: peer,
-            manager: filemanager::new(&self.filestore, rnd, dm, self.token.child_token())
-                .context("Failed to create FileManager")?,
+            filemanager_context: fm_context,
             token: self.token,
-            dm_handle,
+            datamanager_handle: dm_handle,
         })
     }
 }

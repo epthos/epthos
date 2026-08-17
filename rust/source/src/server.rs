@@ -25,9 +25,9 @@ pub struct Server<P: Peer> {
     address: SocketAddr,
     roots: Vec<PathBuf>,
     _peer: P,
-    manager: filemanager::FileManagerContext,
+    filemanager_context: filemanager::FileManagerContext,
     token: CancellationToken,
-    dm_handle: JoinHandle<()>,
+    datamanager_handle: JoinHandle<()>,
 }
 
 pub fn builder(token: CancellationToken) -> Builder {
@@ -38,7 +38,7 @@ impl<P: Peer> Server<P> {
     /// Run the server.
     pub async fn serve(mut self) -> Result<()> {
         let source_server = SourceImpl {
-            filemanager: self.manager.manager.clone(),
+            filemanager: self.filemanager_context.manager.clone(),
         };
         tracing::info!("Listening on {}", &self.address);
         let svc = SourceServer::with_interceptor(source_server, AuthInterceptor::default());
@@ -64,13 +64,13 @@ impl<P: Peer> Server<P> {
                 // We stop the server at the first failure of a submodule, as there is
                 // no real way to continue at the moment.
                 tokio::select! {
-                    r = &mut self.manager.handle => {
+                    r = &mut self.filemanager_context.handle => {
                         tracing::info!("FileManager died");
                         // Pull the ripcord lto ensure everything shuts down.
                         self.token.cancel();
                         filemanager_result = Some(r);
                     },
-                    r = &mut self.dm_handle => {
+                    r = &mut self.datamanager_handle => {
                         tracing::info!("DataManager died");
                         // Pull the ripcord lto ensure everything shuts down.
                         self.token.cancel();
@@ -94,10 +94,10 @@ impl<P: Peer> Server<P> {
             server_result = Some(server.await.context("Server"));
         }
         if filemanager_result.is_none() {
-            filemanager_result = Some(self.manager.handle.await);
+            filemanager_result = Some(self.filemanager_context.handle.await);
         }
         if datamanager_result.is_none() {
-            datamanager_result = Some(self.dm_handle.await);
+            datamanager_result = Some(self.datamanager_handle.await);
         }
 
         let mut errors = Errors::new();
@@ -110,7 +110,10 @@ impl<P: Peer> Server<P> {
     // All failible initialization goes here so we can safely shut down if any
     // fails.
     async fn initialize(&self) -> anyhow::Result<()> {
-        self.manager.manager.set_roots(self.roots.clone()).await
+        self.filemanager_context
+            .manager
+            .set_roots(self.roots.clone())
+            .await
     }
 }
 
