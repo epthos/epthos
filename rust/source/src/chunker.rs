@@ -9,6 +9,7 @@ use crate::{
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+#[derive(Debug)]
 pub struct Address {
     pub file: PathBuf,
     pub offset: usize,

@@ -1,5 +1,8 @@
 use super::{directory::pth as dh, field::TimeInSeconds, file::pth as fh, *};
-use crate::{filestore::file::File, model::FileHash};
+use crate::{
+    filestore::file::File,
+    model::{FileHash, FileHashBuilder},
+};
 use anyhow::bail;
 use crypto::model::EncryptionGroup;
 use ring::digest;
@@ -879,6 +882,44 @@ fn compute_stats() -> anyhow::Result<()> {
         }
     );
 
+    Ok(())
+}
+
+#[test]
+fn backup_cancel() -> anyhow::Result<()> {
+    let mut cnx = Connection::new_in_memory(Arc::new(crypto::Random::new()), Timing::default())?;
+    let a = Path::new("a");
+    // "Cancelling" a backup means restoring its previous Dirty
+    // state, including the timing information, as we want to pick
+    // it up quickly again.
+    let dirty = Dirty {
+        next: secs(100),
+        threshold: secs(200),
+        fsize: 100,
+        mtime: usecs(10000),
+        hash: FileHashBuilder::new().finish().into(),
+        egroup: egroup(10).into(),
+    };
+    db_setup(
+        cnx.conn(),
+        vec![HashMap::from([(a.to_owned(), State::Dirty(dirty.clone()))])],
+        vec![],
+    )?;
+
+    cnx.backup_start(a.to_owned())?;
+    cnx.backups_cancel(HashSet::from([a.to_owned()]))?;
+
+    let got = fh::dump(cnx.conn())?;
+    assert_eq!(
+        got,
+        vec![(
+            a.to_owned(),
+            File {
+                tree_gen: 1,
+                state: State::Dirty(dirty)
+            }
+        )]
+    );
     Ok(())
 }
 

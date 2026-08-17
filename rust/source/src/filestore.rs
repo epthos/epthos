@@ -16,6 +16,7 @@ use rusqlite_migration::Migrations;
 use settings::Setting;
 use std::{
     cmp::{max, min},
+    collections::HashSet,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -137,6 +138,10 @@ pub trait Filestore {
     /// Return all the pending backups. Typically used to ensure the backup engine
     /// has the right state.
     fn backup_pending(&mut self) -> anyhow::Result<Vec<(PathBuf, EncryptionGroup)>>;
+
+    /// Backup was thought to be started, but the service was interrupted and
+    /// it turns out we lost the results...
+    fn backups_cancel(&mut self, paths: HashSet<PathBuf>) -> anyhow::Result<()>;
 
     // Extract stats about the files.
     fn get_stats(&mut self) -> anyhow::Result<Stats>;
@@ -487,11 +492,27 @@ impl Filestore for Connection {
                 &path,
                 file.tree_gen,
                 &State::Busy(Busy {
-                    egroup: dirty.egroup,
+                    egroup: dirty.egroup.clone(),
+                    dirty,
                 }),
             )?;
         } else {
             anyhow::bail!("unexpected state for {:?}", file);
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    fn backups_cancel(&mut self, paths: HashSet<PathBuf>) -> anyhow::Result<()> {
+        let txn = self.conn.transaction()?;
+        for path in paths {
+            let path: LocalPath = path.into();
+            let file = file::get_state(&txn, &path)?.context("missing file")?;
+            if let State::Busy(busy) = file.state {
+                file::set_state(&txn, &path, file.tree_gen, &State::Dirty(busy.dirty))?;
+            } else {
+                anyhow::bail!("unexpected state for {:?}", file);
+            }
         }
         txn.commit()?;
         Ok(())

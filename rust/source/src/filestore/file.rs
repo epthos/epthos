@@ -87,6 +87,9 @@ pub struct Dirty {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Busy {
     pub egroup: StoredEncryptionGroup,
+    // On certain failure modes, we may need to roll back a Busy file to
+    // Dirty.
+    pub dirty: Dirty,
 }
 
 // Clean file. Transitions to Dirty or Unreadable after hashing or
@@ -216,7 +219,7 @@ pub fn set_state(
     tree_gen: i64,
     state: &State,
 ) -> anyhow::Result<usize> {
-    let mut next = None;
+    let next;
     let mut threshold = None;
     let mut fsize = None;
     let mut mtime = None;
@@ -238,7 +241,12 @@ pub fn set_state(
             FileState::Dirty
         }
         State::Busy(busy) => {
-            egroup = Some(&busy.egroup);
+            next = Some(&busy.dirty.next);
+            threshold = Some(&busy.dirty.threshold);
+            fsize = Some(&busy.dirty.fsize);
+            mtime = Some(&busy.dirty.mtime);
+            egroup = Some(&busy.dirty.egroup);
+            hash = Some(&busy.dirty.hash);
             FileState::Busy
         }
         State::Clean(state) => {
@@ -328,11 +336,33 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
                         FromSqlError::Other(anyhow!("missing egroup field").into())
                     })?,
                 }),
-                FileState::Busy => State::Busy(Busy {
-                    egroup: egroup.ok_or_else(|| {
-                        FromSqlError::Other(anyhow!("missing egroup field").into())
-                    })?,
-                }),
+                FileState::Busy => {
+                    // TODO: Eliminate the duplication with above.
+                    let dirty = Dirty {
+                        next: next.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing next field").into())
+                        })?,
+                        threshold: threshold.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing threshold field").into())
+                        })?,
+                        fsize: fsize.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing fsize field").into())
+                        })?,
+                        mtime: mtime.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing mtime field").into())
+                        })?,
+                        hash: hash.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing hash field").into())
+                        })?,
+                        egroup: egroup.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing egroup field").into())
+                        })?,
+                    };
+                    State::Busy(Busy {
+                        egroup: dirty.egroup.clone(),
+                        dirty,
+                    })
+                }
                 FileState::Clean => State::Clean(Clean {
                     next: next
                         .ok_or_else(|| FromSqlError::Other(anyhow!("missing next field").into()))?,

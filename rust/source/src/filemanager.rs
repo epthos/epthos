@@ -175,18 +175,20 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                     "Backup for {:?} is running but not marked as pending",
                     &actual.path
                 );
-                self.store.backup_start(actual.path)?;
+                self.store.backup_start(actual.path.clone())?;
             } else {
                 expected.remove(&actual.path);
             }
             // In all cases, we know the running backup now.
+            tracing::debug!("tracking pending backup for {:?}", &actual.path);
             pending_backups.add(actual.recv);
         }
-        // Really unexpected path: backups we expected to see running already, but which
-        // are not. This should not happen unless there is data corruption as we start it
-        // first then mark it as started.
+        // Unusual path: backups we expected to see running already, but which
+        // are not. This can happen if the backup completed but we died before we
+        // could store that fact.
         if !expected.is_empty() {
-            bail!("The following backups are missing: {:?}", expected);
+            tracing::info!("The following backups are missing: {:?}", expected);
+            self.store.backups_cancel(expected)?;
         }
 
         let mut scan_delay: Option<SystemTime> = None;
@@ -197,6 +199,11 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
         // active, hash files that haven't changed in a while, and otherwise respond
         // to client requests.
         loop {
+            tracing::debug!(
+                "loop with {} in flight backups and {} slots",
+                pending_backups.len(),
+                if backup_slot.is_some() { 1 } else { 0 }
+            );
             let now = self.clock.now();
             // hash_delay is assessed at every round as many operations can request a file be hashed,
             // independently of timing.
@@ -230,6 +237,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         self.store.backup_start(path)?;
                     }
                     Next::Done(delay) => {
+                        tracing::debug!("No backup ready to go");
                         next_event = min(next_event, EarliestEvent::new(delay, "backup"));
                         backup_delay = Some(delay);
                     }
@@ -474,6 +482,9 @@ impl<O> VecFutures<O> {
         VecFuture {
             pending: self.pending.clone(),
         }
+    }
+    pub fn len(&self) -> usize {
+        self.pending.lock().unwrap().len()
     }
 }
 

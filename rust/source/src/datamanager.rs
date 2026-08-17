@@ -186,7 +186,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
         let mut pending = VecDeque::new();
         loop {
             tracing::debug!(
-                "starting with {} remaining, {} pending",
+                "loop with {} remaining, {} pending",
                 remaining,
                 pending.len()
             );
@@ -265,11 +265,13 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                     bail!("failed to send {:?}", result);
                                 }
                                 remaining += 1;
+                            } else {
+                                tracing::warn!("Received chunk for unexpected address {:?}", &addr);
                             }
                         },
                         // IO error while chunking the file.
                         Some(ChunkOp { address: addr, msg: ChunkMsg::Error(err) }) => {
-                            tracing::warn!("chunk error at {:?}+{}: {}", addr.file, addr.offset, err);
+                            tracing::info!("chunk error at {:?}+{}: {}", addr.file, addr.offset, err);
                             if let Some(idx) = pending.iter().position(|p| p.path == addr.file) {
                                 let p = pending.remove(idx).unwrap();
                                 self.store.remove(p.path.clone().into())?;
@@ -278,6 +280,8 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                     bail!("failed to send {:?}", result);
                                 }
                                 remaining += 1;
+                            } else {
+                                tracing::warn!("Received chunk for unexpected address {:?}", &addr);
                             }
                         },
                         None => unreachable!("chunk_tx held by runner"),

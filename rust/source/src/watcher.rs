@@ -5,6 +5,7 @@ use notify::Event;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::mpsc::RecvTimeoutError,
     time::Duration,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -70,6 +71,9 @@ impl WatcherImpl {
                             tracing::info!("notifier failed to return event: {:?}", err);
                         }
                     },
+                    Err(RecvTimeoutError::Timeout) => {
+                        // This is fine, just giving a chance to cancel.
+                    }
                     Err(err) => {
                         tracing::info!("failed to receive from WatcherImpl's copier: {:?}", err);
                         break;

@@ -25,7 +25,7 @@ use test_log::test;
 #[test(tokio::test)]
 async fn wait_for_tree_scan() -> anyhow::Result<()> {
     let (manager_ctx, _store, clock, _tx, token) =
-        test_manager(WatcherState::default(), StoreState::default());
+        test_manager(WatcherState::default(), FileStoreState::default());
 
     // Not a very deep test: we just confirm that when there is nothing
     // to scan, we wait until the next round.
@@ -37,7 +37,7 @@ async fn wait_for_tree_scan() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn detect_rescans_needed() -> anyhow::Result<()> {
-    let mut store = StoreState::default();
+    let mut store = FileStoreState::default();
     // Convince the manager to avoid running a scan right away after
     // the first one.
     store.next_scan = t(10);
@@ -75,7 +75,7 @@ async fn detect_rescans_needed() -> anyhow::Result<()> {
 #[test(tokio::test)]
 async fn set_roots() -> anyhow::Result<()> {
     let (manager_ctx, store_state, _clock, _tx, token) =
-        test_manager(WatcherState::default(), StoreState::default());
+        test_manager(WatcherState::default(), FileStoreState::default());
 
     manager_ctx
         .manager
@@ -89,16 +89,29 @@ async fn set_roots() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test(tokio::test)]
+async fn recover_from_missing_in_flights() -> anyhow::Result<()> {
+    let (manager_ctx, _store_state, _clock, _tx, token) =
+        test_manager(WatcherState::default(), FileStoreState::default());
+
+    // TODO: When the file manager starts, it syncs the in-flight backups with
+    // the ones known to the data manager. This test is for backups that
+    // we think should be ongoing but are not. In those cases, we turn the
+    // file back to dirty, so it gets picked up later again.
+
+    shutdown(token, manager_ctx.handle).await
+}
+
 // ---------------------- helpers -----------------------
 
 /// Creates a test manager with fake watcher and store states that can be
 /// controlled by the test.
 fn test_manager(
     watcher_state: WatcherState,
-    store_state: StoreState,
+    store_state: FileStoreState,
 ) -> (
     FileManagerContext,
-    Arc<Mutex<StoreState>>,
+    Arc<Mutex<FileStoreState>>,
     Handler,
     Sender<watcher::Update>,
     CancellationToken,
@@ -114,7 +127,7 @@ fn test_manager(
         watcher_token.cancelled().await;
     });
     let manager = FileManager::create(
-        FakeStore::new(store_state.clone()),
+        FakeFileStore::new(store_state.clone()),
         FakeDisk::new(),
         clock,
         Box::new(FakeWatcher::new(watcher_state.clone(), rx)),
@@ -161,16 +174,16 @@ struct WatcherState {
 }
 
 #[derive(Debug)]
-struct StoreState {
+struct FileStoreState {
     roots: Vec<PathBuf>,
     dirs_to_scan: VecDeque<PathBuf>,
     next_scan: SystemTime,
     scan_round: i32,
 }
 
-impl Default for StoreState {
-    fn default() -> StoreState {
-        StoreState {
+impl Default for FileStoreState {
+    fn default() -> FileStoreState {
+        FileStoreState {
             roots: vec![],
             dirs_to_scan: VecDeque::new(),
             next_scan: SystemTime::UNIX_EPOCH,
@@ -185,8 +198,8 @@ struct FakeWatcher {
 }
 
 #[derive(Debug)]
-struct FakeStore {
-    state: Arc<Mutex<StoreState>>,
+struct FakeFileStore {
+    state: Arc<Mutex<FileStoreState>>,
 }
 
 impl FakeWatcher {
@@ -195,9 +208,9 @@ impl FakeWatcher {
     }
 }
 
-impl FakeStore {
-    fn new(state: Arc<Mutex<StoreState>>) -> FakeStore {
-        FakeStore { state }
+impl FakeFileStore {
+    fn new(state: Arc<Mutex<FileStoreState>>) -> FakeFileStore {
+        FakeFileStore { state }
     }
 }
 
@@ -213,7 +226,7 @@ impl watcher::Watcher for FakeWatcher {
     }
 }
 
-impl Filestore for FakeStore {
+impl Filestore for FakeFileStore {
     type Scanner<'a> = FakeUpdater;
 
     fn set_roots(&mut self, roots: &[&Path]) -> anyhow::Result<bool> {
@@ -291,6 +304,10 @@ impl Filestore for FakeStore {
     }
 
     fn get_stats(&mut self) -> anyhow::Result<Stats> {
+        todo!()
+    }
+
+    fn backups_cancel(&mut self, _paths: HashSet<PathBuf>) -> anyhow::Result<()> {
         todo!()
     }
 }
