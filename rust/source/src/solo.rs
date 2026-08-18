@@ -45,7 +45,7 @@ where
         let (tx, rx) = mpsc::channel::<I::Operation>(1);
         dm_tx
             .send(tx)
-            .expect(&format!("{}: failed to pass tx back", name));
+            .unwrap_or_else(|_| panic!("{}: failed to pass tx back", name));
         let local = LocalSet::new();
 
         rt.block_on(local.run_until(async {

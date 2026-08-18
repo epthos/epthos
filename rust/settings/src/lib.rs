@@ -32,13 +32,13 @@ use std::{
 
 /// Return the path to the specified anchored config.
 pub fn path(anchor: &Anchor) -> PathBuf {
-    Path::join(anchor.root.as_ref(), format!("{}.toml", &anchor.name))
+    Path::join(anchor.root.as_ref(), format!("{}.toml", anchor.name))
 }
 
 /// Helper to load settings from a standard location.
 pub fn load<T: Anchored>(anchor: &Anchor) -> anyhow::Result<T> {
     let file = path(anchor);
-    let toml_data = fs::read_to_string(&file).context(format!("Config file is {:?}", &file))?;
+    let toml_data = fs::read_to_string(&file).context(format!("Config file is {:?}", file))?;
     load_from_str(&toml_data, anchor)
 }
 
@@ -190,7 +190,7 @@ pub mod process {
                     anchor
                         .root
                         .join("logs")
-                        .join(format!("{}.log", &anchor.name)),
+                        .join(format!("{}.log", anchor.name)),
                 ),
             })
         }
@@ -402,11 +402,7 @@ fn panic_hook(panic_info: &PanicHookInfo) {
 
     let payload = if let Some(s) = payload.downcast_ref::<&str>() {
         Some(&**s)
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        Some(s.as_str())
-    } else {
-        None
-    };
+    } else { payload.downcast_ref::<String>().map(|s| s.as_str()) };
 
     let location = panic_info.location().map(|l| l.to_string());
     let (backtrace, note) = {

@@ -52,7 +52,7 @@ impl Root {
     pub fn file(&self, file_id: &model::EncryptionGroup) -> anyhow::Result<File> {
         let dir = self.dir.join(hex::encode(file_id.as_bytes()));
         if !dir.exists() {
-            std::fs::create_dir(&dir).context(format!("Failed to create output dir {:?}", &dir))?;
+            std::fs::create_dir(&dir).context(format!("Failed to create output dir {:?}", dir))?;
         }
         Ok(File { dir })
     }

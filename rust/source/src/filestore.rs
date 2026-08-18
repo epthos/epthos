@@ -364,7 +364,7 @@ impl Filestore for Connection {
         // picked up by the file watcher), so failure to update the record is an internal
         // inconsistency.
         let Some(current) = file::get_state(&tx, &file_repr)? else {
-            anyhow::bail!("file [{:?}] is expected to be in db", &file_repr);
+            anyhow::bail!("file [{:?}] is expected to be in db", file_repr);
         };
         match update {
             HashUpdate::Hash(snapshot) => {
@@ -491,7 +491,7 @@ impl Filestore for Connection {
                 }),
             )?;
         } else {
-            anyhow::bail!("unexpected state for {:?}", &file);
+            anyhow::bail!("unexpected state for {:?}", file);
         }
         txn.commit()?;
         Ok(())
@@ -527,7 +527,7 @@ impl Filestore for Connection {
             };
             file::set_state(&txn, &path, file.tree_gen, &new_state)?;
         } else {
-            anyhow::bail!("unexpected state for {:?}", &file);
+            anyhow::bail!("unexpected state for {:?}", file);
         }
         txn.commit()?;
         Ok(())
