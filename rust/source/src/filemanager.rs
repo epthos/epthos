@@ -182,14 +182,13 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                 Runner::<S, D, C, DM>::next_scan(&self.disk, &self.clock, &mut self.store, now)?;
 
             tokio::select! {
-                biased;
-
-                // Cancellations come first so we avoid re-polling completed handles.
+                // Cancellations management.
                 _ = self.token.cancelled() => {
                     tracing::info!("Shutting down");
                     break;
                 }
-                watcher_result = &mut self.watcher_handle => {
+                // Avoid re-polling if we already cancelled, as this causes a panic.
+                watcher_result = &mut self.watcher_handle, if !self.token.is_cancelled() => {
                     self.token.cancel();
                     watcher_result.context("Watcher")?;
                 }
@@ -213,6 +212,12 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         }
                     }
                 }
+
+                // Slots management: monitor completion and availability.
+                done = inflight_backups.next() => {
+                    tracing::info!("backup completed: {:?}", &done);
+                    self.store.backup_done(done.path, self.clock.now(), done.update)?;
+                }
                 slot = self.datamanager.backup_slots().recv() => {
                     match slot {
                         Some(slot) => {
@@ -223,10 +228,6 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         },
                     };
                 },
-                done = inflight_backups.next() => {
-                    tracing::info!("backup completed: {:?}", &done);
-                    self.store.backup_done(done.path, self.clock.now(), done.update)?;
-                }
 
                 // This can be unbounded. Goes last so it doesn't take away work from the rest.
                 update = self.watcher.next().recv() => {
