@@ -3,22 +3,21 @@
 
 use crate::{
     clock::{self, Clock},
-    datamanager::{BackupSlot, DataManager, DataManagerImpl},
+    datamanager::{BackupResult, BackupSlot, DataManager, DataManagerImpl},
     disk::{self, Disk},
-    filestore::{self, Connection, Filestore, HashUpdate, Next, Scanner, Timing},
+    filestore::{Connection, Filestore, HashUpdate, Next, Scanner, Timing},
     model::Stats,
     solo::{self, Solo},
     watcher,
 };
 use anyhow::{Context, bail};
 use std::{
-    cmp::min,
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
     task::Poll,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 use tokio::{
     sync::{
@@ -119,6 +118,10 @@ impl FileManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Actor implementation
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 enum Operation {
     SetRoots(Vec<PathBuf>, Sender<anyhow::Result<()>>),
@@ -141,169 +144,62 @@ where
     token: CancellationToken,
 }
 
-fn duration_or_zero(now: SystemTime, target: &Option<SystemTime>) -> Duration {
-    if let Some(target) = target.as_ref() {
-        if now > *target {
-            Duration::from_secs(0)
-        } else {
-            target.duration_since(now).unwrap()
-        }
-    } else {
-        Duration::from_secs(0)
-    }
-}
-
 // The agent side of the manager. Holds the mutable store and watcher, and
 // performs the dispatching logic.
 impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, DM> {
     type Operation = Operation;
 
     async fn run(mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
-        let pending_backups = VecFutures::new();
-        let mut expected: HashSet<PathBuf> = self
-            .store
-            .backup_pending()?
-            .into_iter()
-            .map(|item| item.0)
-            .collect();
-        for actual in self.datamanager.in_flight().await?.into_iter() {
-            // TODO: test that path.
-            if !expected.contains(&actual.path) {
-                // Unusual path: we have a running backup, but we don't track it
-                // as pending. This is recoverable easily, simply start it now.
-                tracing::info!(
-                    "Backup for {:?} is running but not marked as pending",
-                    &actual.path
-                );
-                self.store.backup_start(actual.path.clone())?;
-            } else {
-                expected.remove(&actual.path);
-            }
-            // In all cases, we know the running backup now.
-            tracing::debug!("tracking pending backup for {:?}", &actual.path);
-            pending_backups.add(actual.recv);
-        }
-        // Unusual path: backups we expected to see running already, but which
-        // are not. This can happen if the backup completed but we died before we
-        // could store that fact.
-        if !expected.is_empty() {
-            tracing::info!("The following backups are missing: {:?}", expected);
-            self.store.backups_cancel(expected)?;
-        }
-
-        let mut scan_delay: Option<SystemTime> = None;
-        let mut backup_slot: Option<DM::Slot> = None;
-        let mut event_last_displayed = EarliestEvent::unset("nope");
+        // Backups currently in flight in the datamanager.
+        let mut inflight_backups = self.sync_inflight_backups().await?;
+        let mut backup_slots: VecDeque<DM::Slot> = VecDeque::new();
 
         // The work loop will continuously refresh the filesystem when a scan is
         // active, hash files that haven't changed in a while, and otherwise respond
-        // to client requests.
+        // to client requests. Its triggers are a mix of async events and time based
+        // changes that the underlying filestore manages.
         loop {
             tracing::debug!(
                 "loop with {} in flight backups and {} slots",
-                pending_backups.len(),
-                if backup_slot.is_some() { 1 } else { 0 }
+                inflight_backups.len(),
+                backup_slots.len(),
             );
             let now = self.clock.now();
-            // hash_delay is assessed at every round as many operations can request a file be hashed,
-            // independently of timing.
-            let mut hash_delay: Option<SystemTime> = None;
-            let mut next_event = EarliestEvent::unset("nope");
-            match self.store.hash_next(now)? {
-                Next::Next(file, ()) => {
-                    tracing::debug!("hashing stale file {:?}", &file);
-                    let update = match disk::snapshot(&self.disk, &file) {
-                        Ok(snapshot) => HashUpdate::Hash(snapshot),
-                        Err(err) => HashUpdate::Unreadable(err),
-                    };
-                    self.store.hash_update(file, now, update)?;
-                }
-                Next::Done(delay) => {
-                    next_event = min(next_event, EarliestEvent::new(delay, "hash"));
-                    hash_delay = Some(delay);
-                }
-            }
-            let mut backup_delay: Option<SystemTime> = None;
-            // No need to look up backups that need to be done if there is no open slot.
-            if backup_slot.is_some() {
-                match self.store.backup_next(now)? {
-                    Next::Next(path, _egroup) => {
-                        tracing::info!("starting new backup for {:?}", &path);
-                        let slot = backup_slot.take().unwrap();
-                        // We enqueue first, so that if there is a crash we can use _running_ backups to
-                        // fill in the list of _started_ backups, without waiting for the backup queue.
-                        let rx = slot.enqueue(path.clone()).await?;
-                        pending_backups.add(rx);
-                        self.store.backup_start(path)?;
-                    }
-                    Next::Done(delay) => {
-                        tracing::debug!("No backup ready to go");
-                        next_event = min(next_event, EarliestEvent::new(delay, "backup"));
-                        backup_delay = Some(delay);
-                    }
-                }
-            }
-            if scan_delay.is_none() {
-                match self.store.tree_scan_next()? {
-                    filestore::Next::Done(delay) => {
-                        next_event = min(next_event, EarliestEvent::new(delay, "tree scan"));
-                        scan_delay = Some(delay);
-                        tracing::info!("finished tree scan, next at {}", isotime(delay)?);
-                    }
-                    filestore::Next::Next(dir, mut updater) => {
-                        tracing::debug!("scanning {:?}", &dir);
-                        match self.disk.scan(&dir) {
-                            Ok(subdirs) => {
-                                let mut complete = true;
-                                for entry in subdirs {
-                                    match entry {
-                                        Ok(entry) => updater.update(self.clock.now(), &entry)?,
-                                        Err(_) => complete = false,
-                                    }
-                                }
-                                updater.commit(complete)?;
-                            }
-                            Err(e) => {
-                                updater.error(e.into())?;
-                            }
-                        }
-                    }
-                }
-            }
-            let scan_sleep = duration_or_zero(now, &scan_delay);
-            let hash_sleep = duration_or_zero(now, &hash_delay);
-            let back_sleep = duration_or_zero(now, &backup_delay);
-            // Any delay set as None indicates that we could process the underlying work
-            // right away. This is a bit more complex for backups, as we also need to know
-            // that the datamanager has the capacity to accept a new backup.
-            let can_backup = backup_slot.is_some() && backup_delay.is_none();
-            let more_pending = [&scan_delay, &hash_delay].iter().any(|d| d.is_none()) || can_backup;
-            if !more_pending && next_event.is_valid() {
-                // Do not repeat the same message, as we might be spinning a few
-                // time, say when the watcher repeatedly interrupts us.
-                if next_event != event_last_displayed {
-                    tracing::info!(
-                        "idling until next {} at {}",
-                        next_event.event,
-                        isotime(next_event.time)?,
-                    );
-                    event_last_displayed = next_event;
-                }
-            }
+
+            // Perform each possible non-blocking operation, and return the delay until
+            // the next such work.
+            let hash_delay =
+                Runner::<S, D, C, DM>::next_hash(&self.disk, &self.clock, &mut self.store, now)?;
+            let backup_delay = Runner::<S, D, C, DM>::next_backup(
+                &self.clock,
+                &mut self.store,
+                now,
+                &mut backup_slots,
+                &mut inflight_backups,
+            )
+            .await?;
+            let scan_delay =
+                Runner::<S, D, C, DM>::next_scan(&self.disk, &self.clock, &mut self.store, now)?;
+
             tokio::select! {
-                _ = self.clock.sleep(Duration::from_millis(1), "tick"), if more_pending => {
-                    // The artificial delay allows for pending events (client, watcher)
-                    // to take place.
+                biased;
+
+                // Cancellations come first so we avoid re-polling completed handles.
+                _ = self.token.cancelled() => {
+                    tracing::info!("Shutting down");
+                    break;
                 }
-                _ = self.clock.sleep(scan_sleep, "tree_scan"), if scan_delay.is_some() => {
-                    tracing::info!("starting a new tree scan");
-                    scan_delay = None;
-                    if let Err(err) = self.store.tree_scan_start(now) {
-                        tracing::error!("tree_scan_start() failed: {:?}", err);
-                    }
+                watcher_result = &mut self.watcher_handle => {
+                    self.token.cancel();
+                    watcher_result.context("Watcher")?;
                 }
-                _ = self.clock.sleep(hash_sleep, "hash"), if hash_delay.is_some() => { }
-                _ = self.clock.sleep(back_sleep, "backup"), if backup_delay.is_some() => { }
+
+                // Unblock if any action can be taken right away.
+                _ = hash_delay => {}
+                _ = backup_delay => {}
+                _ = scan_delay => {}
+
+                // Interactions with other systems.
                 op = rx.recv() => {
                     tracing::debug!("handling client operation {:?}", &op);
                     match op {
@@ -317,20 +213,22 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         }
                     }
                 }
-                slot = self.datamanager.backup_slots().recv(), if backup_slot.is_none() => {
+                slot = self.datamanager.backup_slots().recv() => {
                     match slot {
                         Some(slot) => {
-                            backup_slot = Some(slot);
+                            backup_slots.push_back(slot);
                         },
                         None => {
                            bail!("DataManager failed");
                         },
                     };
                 },
-                done = pending_backups.next() => {
+                done = inflight_backups.next() => {
                     tracing::info!("backup completed: {:?}", &done);
                     self.store.backup_done(done.path, self.clock.now(), done.update)?;
                 }
+
+                // This can be unbounded. Goes last so it doesn't take away work from the rest.
                 update = self.watcher.next().recv() => {
                     tracing::debug!("handling watcher operation {:?}", &update);
                     match update {
@@ -346,14 +244,6 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                             }
                         },
                     }
-                }
-                _ = self.token.cancelled() => {
-                    tracing::info!("Shutting down");
-                    break;
-                }
-                watcher_result = &mut self.watcher_handle => {
-                    self.token.cancel();
-                    watcher_result.context("Watcher")?;
                 }
             }
         }
@@ -373,92 +263,138 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         }
         Ok(())
     }
-}
 
-fn isotime<T>(dt: T) -> anyhow::Result<String>
-where
-    T: Into<time::OffsetDateTime>,
-{
-    dt.into()
-        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .context("can't format timestamp")
-}
-
-/// Helper type to track the earliest event that will happen next.
-struct EarliestEvent<'a> {
-    time: SystemTime,
-    event: &'a str,
-}
-
-impl<'a> EarliestEvent<'a> {
-    /// Create an invalid earliest event.
-    fn unset(name: &'a str) -> EarliestEvent<'a> {
-        EarliestEvent::new(UNIX_EPOCH, name)
-    }
-    fn new(time: SystemTime, event: &'a str) -> EarliestEvent<'a> {
-        EarliestEvent { time, event }
-    }
-    fn is_valid(&self) -> bool {
-        self.time != UNIX_EPOCH
-    }
-}
-
-impl std::cmp::Eq for EarliestEvent<'_> {}
-
-impl std::cmp::PartialOrd for EarliestEvent<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl std::cmp::PartialEq for EarliestEvent<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.time == other.time
-    }
-}
-
-impl std::cmp::Ord for EarliestEvent<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self.time == UNIX_EPOCH {
-            if other.time == UNIX_EPOCH {
-                std::cmp::Ordering::Equal
-            } else {
-                std::cmp::Ordering::Greater
+    /// Hash the next file that's due for hashing, or return a sleep future until the
+    /// next one is due.
+    fn next_hash<'b>(
+        disk: &D,
+        clock: &'b C,
+        store: &mut S,
+        now: SystemTime,
+    ) -> anyhow::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
+        const NAME: &str = "hash";
+        match store.hash_next(now)? {
+            Next::Next(file, ()) => {
+                tracing::debug!("hashing stale file {:?}", &file);
+                // TODO: this can take arbitrarily long and prevent shutdown /
+                // stale other operations.
+                let update = match disk::snapshot(disk, &file) {
+                    Ok(snapshot) => HashUpdate::Hash(snapshot),
+                    Err(err) => HashUpdate::Unreadable(err),
+                };
+                store.hash_update(file, now, update)?;
+                Ok(clock.sleep(Duration::ZERO, NAME))
             }
-        } else if other.time == UNIX_EPOCH {
-            std::cmp::Ordering::Less
-        } else {
-            self.time.cmp(&other.time)
+            Next::Done(delay) => Ok(clock.sleep(to_duration(now, delay), NAME)),
         }
     }
+
+    /// Backup the next file that needs backing up, or return a sleep future until the
+    /// next file is due. This takes into consideration available slots.
+    async fn next_backup<'b, 'c>(
+        clock: &'b C,
+        store: &'c mut S,
+        now: SystemTime,
+        backup_slots: &mut VecDeque<DM::Slot>,
+        inflight_backups: &mut VecFutures<BackupResult>,
+    ) -> anyhow::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
+        const NAME: &str = "backup";
+        if backup_slots.is_empty() {
+            // No open backup slot? Wait "forever".
+            return Ok(clock.sleep(Duration::from_secs(3600), NAME));
+        }
+        match store.backup_next(now)? {
+            Next::Next(path, _egroup) => {
+                tracing::info!("starting new backup for {:?}", &path);
+                let slot = backup_slots.pop_front().unwrap();
+                // We enqueue first, so that if there is a crash we can use _running_ backups to
+                // fill in the list of _started_ backups, without waiting for the backup queue.
+                let rx = slot.enqueue(path.clone()).await?;
+                inflight_backups.add(rx);
+                store.backup_start(path)?;
+                Ok(clock.sleep(Duration::ZERO, NAME))
+            }
+            Next::Done(delay) => Ok(clock.sleep(to_duration(now, delay), NAME)),
+        }
+    }
+
+    /// Scan the next directory that's ready for scanning, or return a sleep future until such
+    /// a directory is due.
+    fn next_scan<'b>(
+        disk: &D,
+        clock: &'b C,
+        store: &mut S,
+        now: SystemTime,
+    ) -> anyhow::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
+        const NAME: &str = "tree_scan";
+        match store.tree_scan_next()? {
+            Next::Done(delay) => Ok(clock.sleep(to_duration(now, delay), NAME)),
+            Next::Next(dir, mut updater) => {
+                // TODO: this can take arbitrarily long and prevent shutdown /
+                // stale other operations.
+                tracing::debug!("scanning {:?}", &dir);
+                match disk.scan(&dir) {
+                    Ok(subdirs) => {
+                        let mut complete = true;
+                        for entry in subdirs {
+                            match entry {
+                                Ok(entry) => updater.update(clock.now(), &entry)?,
+                                Err(_) => complete = false,
+                            }
+                        }
+                        updater.commit(complete)?;
+                    }
+                    Err(e) => {
+                        updater.error(e.into())?;
+                    }
+                }
+                Ok(clock.sleep(Duration::ZERO, NAME))
+            }
+        }
+    }
+
+    /// Synchronize the in-flight backups known to the filemanager with the ones known to
+    /// the datamanager.
+    async fn sync_inflight_backups(&mut self) -> anyhow::Result<VecFutures<BackupResult>> {
+        let pending_backups = VecFutures::new();
+        let mut expected: HashSet<PathBuf> = self
+            .store
+            .backup_pending()?
+            .into_iter()
+            .map(|item| item.0)
+            .collect();
+        for actual in self.datamanager.in_flight().await?.into_iter() {
+            // TODO: test that path.
+            if !expected.contains(&actual.path) {
+                // Unusual path: we have a running backup, but we don't track it
+                // as pending. This is recoverable easily, simply start it now.
+                // Note: this will blow up if the file is not dirty, denoting a
+                // real discrepancy in the two stores.
+                tracing::info!(
+                    "Backup for {:?} is running but not marked as pending",
+                    &actual.path
+                );
+                self.store.backup_start(actual.path.clone())?;
+            } else {
+                expected.remove(&actual.path);
+            }
+            // In all cases, we know the running backup now.
+            tracing::debug!("tracking pending backup for {:?}", &actual.path);
+            pending_backups.add(actual.recv);
+        }
+        if !expected.is_empty() {
+            tracing::info!("The following backups will be retried: {:?}", expected);
+            self.store.backups_cancel(expected)?;
+        }
+        Ok(pending_backups)
+    }
 }
 
-#[cfg(test)]
-mod earliest_event_test {
-    use std::{
-        cmp::min,
-        time::{Duration, UNIX_EPOCH},
-    };
-
-    use crate::filemanager::EarliestEvent;
-
-    #[test]
-    fn ordered_as_intended() {
-        let mut earliest = EarliestEvent::unset("wrong");
-        assert!(!earliest.is_valid()); // we don't have an earliest event.
-
-        let t10 = UNIX_EPOCH + Duration::from_secs(10);
-        earliest = min(earliest, EarliestEvent::new(t10, "10s"));
-        // We expect any non epoch time to be earlier... (the weird part)
-        assert!(earliest.is_valid());
-        assert_eq!(earliest.time, t10);
-
-        let t5 = UNIX_EPOCH + Duration::from_secs(5);
-        earliest = min(earliest, EarliestEvent::new(t5, "5s"));
-        assert_eq!(earliest.time, t5);
-
-        let t15 = UNIX_EPOCH + Duration::from_secs(15);
-        earliest = min(earliest, EarliestEvent::new(t15, "15s"));
-        assert_eq!(earliest.time, t5);
+fn to_duration(now: SystemTime, delay: SystemTime) -> Duration {
+    if let Ok(duration) = delay.duration_since(now) {
+        duration
+    } else {
+        Duration::ZERO
     }
 }
 
