@@ -134,7 +134,11 @@ impl Watcher for WatcherImpl {
             if self.roots.contains(*root) {
                 continue;
             }
-            self.watcher.watch(root, notify::RecursiveMode::Recursive)?;
+            // Issue 6c6e5e41650b46f08f720ca0576073bda73cc938: notify-rs refuses to
+            // watch the whole directory if a subdirectory has permission issues.
+            if let Err(e) = self.watcher.watch(root, notify::RecursiveMode::Recursive) {
+                tracing::warn!("watcher failed to watch {:?}: {}", root, e);
+            }
         }
         for root in remaining {
             self.watcher.unwatch(&root)?;
