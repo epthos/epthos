@@ -460,7 +460,19 @@ impl Filestore for Connection {
         let file_repr: LocalPath = path.into();
         let mtime: TimeInMicroseconds = mtime.into();
         let mut tx = self.conn.transaction()?;
-        metadata_update(&mut tx, &file_repr, next, None, fsize, mtime, &self.timing)?;
+        // Place the file in the current tree gen for the case where it's new.
+        // This confirms that we "just" saw the file.
+        let tree_gen = settings::get_int(&tx, SETTING_TREE_GEN)?.unwrap_or(0);
+        metadata_update(
+            &mut tx,
+            &file_repr,
+            next,
+            None,
+            tree_gen,
+            fsize,
+            mtime,
+            &self.timing,
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -591,6 +603,7 @@ impl Scanner for UpdaterImpl<'_> {
                     &path,
                     now,
                     Some(self.aim),
+                    self.aim,
                     *fsize,
                     mtime,
                     &self.timing,
@@ -632,17 +645,21 @@ fn pick_egroup(
     Ok(egroup)
 }
 
+// Update the metadata for the file. |tree_gen| represents the optional tree gen
+// we want to _force_ the file to be moved to, even if it exists. |fallback_tree_gen|
+// is the required tree gen to use if the file is new.
 fn metadata_update(
     tx: &mut rusqlite::Transaction,
     path: &LocalPath,
     now: SystemTime,
     tree_gen: Option<i64>,
+    fallback_tree_gen: i64,
     fsize: FileSize,
     mtime: TimeInMicroseconds,
     timing: &Timing,
 ) -> anyhow::Result<()> {
     let Some(state) = file::get_state(tx, path)? else {
-        file::new(tx, path, tree_gen.unwrap_or(0), &now.into())?;
+        file::new(tx, path, fallback_tree_gen, &now.into())?;
         return Ok(());
     };
     let tree_gen = tree_gen.unwrap_or(state.tree_gen);

@@ -591,7 +591,7 @@ fn metadata_update_adds_file() -> anyhow::Result<()> {
 }
 
 #[test]
-fn metadata_always_advance_tree_gen() -> anyhow::Result<()> {
+fn scan_update_advance_tree_gen() -> anyhow::Result<()> {
     let mut cnx = Connection::new_in_memory(Arc::new(FakeRandom::new(vec![])), Timing::default())?;
 
     let root = PathBuf::from("r");
