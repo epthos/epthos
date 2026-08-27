@@ -9,6 +9,7 @@ use rpcutil::auth::AuthInterceptor;
 use settings::connection;
 use source_proto::{
     GetStatsReply, GetStatsRequest,
+    get_stats_reply::StateInfo,
     source_server::{Source, SourceServer},
 };
 use std::{net::SocketAddr, path::PathBuf};
@@ -135,7 +136,11 @@ impl Source for SourceImpl {
     ) -> anyhow::Result<tonic::Response<GetStatsReply>, tonic::Status> {
         match self.filemanager.get_stats().await {
             Ok(stats) => Ok(Response::new(GetStatsReply {
-                total_file_count: stats.total_file_count,
+                state_info: stats
+                    .file_count
+                    .into_iter()
+                    .map(|(state, file_count)| StateInfo { state, file_count })
+                    .collect(),
             })),
             Err(err) => Err(tonic::Status::internal(err.to_string())),
         }

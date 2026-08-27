@@ -9,5 +9,9 @@ service Source {
 message GetStatsRequest {}
 
 message GetStatsReply {
-  int32 total_file_count = 1;
+  message StateInfo {
+    string state = 1;
+    uint32 file_count = 2;
+  }
+  repeated StateInfo state_info = 1;
 }

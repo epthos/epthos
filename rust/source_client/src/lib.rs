@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Context;
 use mockall::automock;
 use settings::{client, connection};
@@ -15,7 +17,7 @@ pub trait Source {
 }
 
 pub struct Stats {
-    pub total_file_count: i32,
+    pub state_info: HashMap<String, u32>,
 }
 
 /// Create a new Source client.
@@ -50,7 +52,11 @@ impl Source for SourceImpl {
             .context("rpc failed")?
             .into_inner();
         return Ok(Stats {
-            total_file_count: resp.total_file_count,
+            state_info: resp
+                .state_info
+                .into_iter()
+                .map(|info| (info.state, info.file_count))
+                .collect(),
         });
     }
 }

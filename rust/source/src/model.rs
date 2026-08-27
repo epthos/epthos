@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{collections::HashMap, time::SystemTime};
 use thiserror::Error;
 
 /// File size, read from the filesystem.
@@ -50,7 +50,7 @@ pub enum HashConversionError {
 
 #[derive(Debug, PartialEq, Default)]
 pub struct Stats {
-    pub total_file_count: i32,
+    pub file_count: HashMap<String, u32>,
 }
 
 pub struct FileHashBuilder {

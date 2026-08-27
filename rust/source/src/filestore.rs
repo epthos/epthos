@@ -580,7 +580,9 @@ impl Filestore for Connection {
 
     fn get_stats(&mut self) -> anyhow::Result<Stats> {
         let txn = self.conn.transaction()?;
-        file::stats(&txn)
+        Ok(Stats {
+            file_count: file::stats(&txn)?,
+        })
     }
 }
 

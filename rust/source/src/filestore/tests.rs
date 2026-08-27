@@ -878,7 +878,7 @@ fn compute_stats() -> anyhow::Result<()> {
     assert_eq!(
         stats,
         Stats {
-            total_file_count: 2 // we report files.
+            file_count: HashMap::from([("New".into(), 2)]) // we report files.
         }
     );
 

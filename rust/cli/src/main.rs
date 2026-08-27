@@ -249,7 +249,7 @@ async fn status(source: &client::Settings, info: &connection::Info) -> anyhow::R
         .get_stats(GetStatsRequest::default())
         .await?
         .into_inner();
-    println!("Total file count: {}", stats.total_file_count);
+    println!("Per state info: {:?}", stats.state_info);
     Ok(())
 }
 
