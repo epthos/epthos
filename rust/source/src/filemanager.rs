@@ -2,15 +2,17 @@
 //! detects changes that need to be backed up.
 
 use crate::{
+    bail_fatal,
     clock::{self, Clock},
     datamanager::{BackupResult, BackupSlot, DataManager, DataManagerImpl},
     disk::{self, Disk},
+    fatal::{self, Shutdown},
     filestore::{Connection, Filestore, HashUpdate, Next, Scanner, Timing},
     model::Stats,
     solo::{self, Solo},
     watcher,
 };
-use anyhow::{Context, bail};
+use anyhow::Context;
 use std::{
     collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -102,19 +104,20 @@ impl FileManager {
     // set_roots() will update the roots for file scanning. The updated value will be used
     // as soon as possible.
     #[tracing::instrument(skip(self))]
-    pub async fn set_roots(&self, roots: Vec<PathBuf>) -> anyhow::Result<()> {
+    pub async fn set_roots(&self, roots: Vec<PathBuf>) -> fatal::Result<()> {
         let (tx, mut rx) = mpsc::channel::<anyhow::Result<()>>(1);
         let op = Operation::SetRoots(roots, tx);
-        self.tx.send(op).await?;
-        rx.recv().await.context("WatcherImpl closed early")??;
+        self.tx.send(op).await.shutdown()?;
+        rx.recv().await.shutdown()??;
         Ok(())
     }
 
     #[allow(dead_code)] // TODO: use it!
-    pub async fn get_stats(&self) -> anyhow::Result<Stats> {
+    pub async fn get_stats(&self) -> fatal::Result<Stats> {
         let (tx, rx) = oneshot::channel::<anyhow::Result<Stats>>();
-        self.tx.send(Operation::GetStats(tx)).await?;
-        rx.await.context("FileManager Runner closed early")?
+        self.tx.send(Operation::GetStats(tx)).await.shutdown()?;
+        let stats = rx.await.shutdown()??;
+        Ok(stats)
     }
 }
 
@@ -149,7 +152,7 @@ where
 impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, DM> {
     type Operation = Operation;
 
-    async fn run(mut self, mut rx: Receiver<Operation>) -> anyhow::Result<()> {
+    async fn run(mut self, mut rx: Receiver<Operation>) -> fatal::Result<()> {
         // Backups currently in flight in the datamanager.
         let mut inflight_backups = self.sync_inflight_backups().await?;
         let mut backup_slots: VecDeque<DM::Slot> = VecDeque::new();
@@ -181,15 +184,17 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                 now,
                 &mut op_stat.hash,
             )?;
-            let backup_delay = Runner::<S, D, C, DM>::next_backup(
-                &self.clock,
-                &mut self.store,
-                now,
-                &mut backup_slots,
-                &mut inflight_backups,
-                &mut op_stat.backup_start,
-            )
-            .await?;
+            let backup_delay = bail_fatal!(
+                Runner::<S, D, C, DM>::next_backup(
+                    &self.clock,
+                    &mut self.store,
+                    now,
+                    &mut backup_slots,
+                    &mut inflight_backups,
+                    &mut op_stat.backup_start,
+                )
+                .await
+            );
             let scan_delay = Runner::<S, D, C, DM>::next_scan(
                 &self.disk,
                 &self.clock,
@@ -237,15 +242,9 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                     self.store.backup_done(done.path, self.clock.now(), done.update)?;
                 }
                 slot = self.datamanager.backup_slots().recv() => {
-                    match slot {
-                        Some(slot) => {
-                            op_stat.backup_slot += 1;
-                            backup_slots.push_back(slot);
-                        },
-                        None => {
-                           bail!("DataManager failed");
-                        },
-                    };
+                    let slot = bail_fatal!(slot.shutdown());
+                    op_stat.backup_slot += 1;
+                    backup_slots.push_back(slot);
                 },
 
                 // This can be unbounded. Goes last so it doesn't take away work from the rest.
@@ -321,7 +320,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         backup_slots: &mut VecDeque<DM::Slot>,
         inflight_backups: &mut VecFutures<BackupResult>,
         op_stat: &mut u64,
-    ) -> anyhow::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
+    ) -> fatal::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
         const NAME: &str = "backup";
         if backup_slots.is_empty() {
             // No open backup slot? Wait "forever".

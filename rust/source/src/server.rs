@@ -1,5 +1,8 @@
 use self::{builder::Builder, peer::Peer};
-use crate::filemanager::{self, FileManager};
+use crate::{
+    fatal::{self, Fatal},
+    filemanager::{self, FileManager},
+};
 use anyhow::{Context, Result};
 use error_collection::Errors;
 use rpcutil::auth::AuthInterceptor;
@@ -84,6 +87,9 @@ impl<P: Peer> Server<P> {
                     }
                 }
             }
+            Err(Fatal::Shutdown) => {
+                self.token.cancel();
+            }
             Err(e) => {
                 tracing::error!("Server init failed: {}", e);
                 self.token.cancel();
@@ -109,7 +115,7 @@ impl<P: Peer> Server<P> {
 
     // All failible initialization goes here so we can safely shut down if any
     // fails.
-    async fn initialize(&self) -> anyhow::Result<()> {
+    async fn initialize(&self) -> fatal::Result<()> {
         self.filemanager_context
             .manager
             .set_roots(self.roots.clone())

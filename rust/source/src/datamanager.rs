@@ -1,14 +1,16 @@
 //! The DataManager performs backup creation.
 
 use crate::{
+    bail_fatal,
     chunker::{Address, ChunkMsg, ChunkOp, Chunker, RealChunker},
     datastore::Datastore,
     disk::{self, Disk, Snapshot},
+    fatal::{self, Shutdown},
     filestore::HashUpdate,
     model::FileHashBuilder,
     solo::{self, Solo},
 };
-use anyhow::{Context, bail};
+use anyhow::Context;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -31,7 +33,7 @@ pub trait DataManager {
     /// Provides the ongoing backups and the receiver for their completion.
     /// This is to be invoked only once at initialization, to restore the
     /// client's internal state.
-    async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>>;
+    async fn in_flight(&mut self) -> fatal::Result<Vec<InFlight>>;
 
     /// Provides the receiver of new backup slots.
     fn backup_slots(&mut self) -> &mut Receiver<Self::Slot>;
@@ -42,7 +44,7 @@ pub trait DataManager {
 pub trait BackupSlot {
     /// Enqueue a backup for the specified path. Upon backup completion (either
     /// successful or not), the oneshot receiver will be triggered with the result.
-    async fn enqueue(self, path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>>;
+    async fn enqueue(self, path: PathBuf) -> fatal::Result<oneshot::Receiver<BackupResult>>;
 }
 
 /// Overall result for a backup request. When successful, the hash update matches
@@ -121,10 +123,11 @@ impl DataManager for DataManagerImpl {
         &mut self.slot_rx
     }
 
-    async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>> {
+    async fn in_flight(&mut self) -> fatal::Result<Vec<InFlight>> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Op::InFlight(tx)).await?;
-        rx.await.context("from DataManager")
+        self.tx.send(Op::InFlight(tx)).await.shutdown()?;
+        let result = rx.await.shutdown()?;
+        Ok(result)
     }
 }
 
@@ -145,12 +148,9 @@ pub struct BackupSlotImpl {
 }
 
 impl BackupSlot for BackupSlotImpl {
-    async fn enqueue(self, path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>> {
+    async fn enqueue(self, path: PathBuf) -> fatal::Result<oneshot::Receiver<BackupResult>> {
         let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Op::Enqueue(path, tx))
-            .await
-            .context("Runner failed")?;
+        self.tx.send(Op::Enqueue(path, tx)).await.shutdown()?;
         Ok(rx)
     }
 }
@@ -173,13 +173,13 @@ struct PendingBackup {
 impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
     type Operation = Op;
 
-    async fn run(self, mut rx: Receiver<Op>) -> anyhow::Result<()> {
+    async fn run(self, mut rx: Receiver<Op>) -> fatal::Result<()> {
         let chunker = RealChunker::new(self.disk.clone());
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<ChunkOp>(1);
 
         // Initial handshake: the handler must call Init.
         let Some(Op::Init((slot_sender, op_sender))) = rx.recv().await else {
-            bail!("Initialization failed");
+            panic!("Initialization failed");
         };
         // remaining should come from actual capacity vs currently pending backups.
         let mut remaining = 1;
@@ -194,14 +194,10 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                 // Try to hand a backup slot to the caller, if there is capacity.
                 // We use reserve() as selecting on send would lose the message.
                 permit = slot_sender.reserve(), if remaining > 0 => {
-                    match permit {
-                        Ok(permit) => {
-                            tracing::debug!("sending one slot");
-                            permit.send(BackupSlotImpl { tx: op_sender.clone() });
-                            remaining -= 1;
-                        },
-                        Err(e) => return Err(e).context("receiver is gone"),
-                    }
+                    let permit = bail_fatal!(permit.shutdown());
+                    tracing::debug!("sending one slot");
+                    permit.send(BackupSlotImpl { tx: op_sender.clone() });
+                    remaining -= 1;
                 }
                 // Process an incoming request from the handler or any backup slot.
                 op = rx.recv() => {
@@ -209,7 +205,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                     match op {
                         Some(Op::Init(_)) => {
                             // This only happens at startup!
-                            bail!("Init received after start");
+                            panic!("Init received after start");
                         },
                         // A backup slot was consumed to start a new backup.
                         Some(Op::Enqueue(path, tx)) => {
@@ -223,16 +219,14 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                         Some(Op::InFlight(op_tx)) => {
                             let mut response = vec![];
                             for path in self.store.list()? {
-                                let path : PathBuf = path.try_into()?;
+                                let path : PathBuf = path.try_into().context("path conversion")?;
                                 chunker.chunk(Address { file: path.clone(), offset: 0 }, chunk_tx.clone());
                                 let (bk_tx, bk_rx) = oneshot::channel();
                                 response.push(InFlight{path: path.clone(), recv: bk_rx});
                                 pending.push_front(PendingBackup{path, tx: bk_tx, hash_builder: FileHashBuilder::new()});
                                 remaining -= 1;
                             }
-                            if  op_tx.send(response).is_err() {
-                                bail!("peer died");
-                            }
+                            bail_fatal!(op_tx.send(response).shutdown());
                         },
                         // End signal: _all_ senders are gone (incl all slots and
                         // the handler as well).
@@ -261,10 +255,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                     mtime,
                                 };
                                 let result = HashUpdate::Hash(snapshot);
-                                if let Err(result) = p.tx.send(BackupResult { path: p.path, update: result }) {
-                                    bail!("failed to send {:?}", result);
-                                }
-                                remaining += 1;
+                                bail_fatal!(p.tx.send(BackupResult { path: p.path, update: result }).shutdown());                                remaining += 1;
                             } else {
                                 tracing::warn!("Received chunk for unexpected address {:?}", &addr);
                             }
@@ -276,10 +267,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                 let p = pending.remove(idx).unwrap();
                                 self.store.remove(p.path.clone().into())?;
                                 let result = HashUpdate::Unreadable(err);
-                                if let Err(result) = p.tx.send(BackupResult { path: p.path, update: result }) {
-                                    bail!("failed to send {:?}", result);
-                                }
-                                remaining += 1;
+                                bail_fatal!(p.tx.send(BackupResult { path: p.path, update: result }).shutdown());                                remaining += 1;
                             } else {
                                 tracing::warn!("Received chunk for unexpected address {:?}", &addr);
                             }
@@ -304,7 +292,7 @@ mod tests {
     use crate::{
         datamanager::DataManagerImpl, datastore::Datastore, fake_disk::FakeDisk, model::Chunk,
     };
-    use anyhow::Context;
+    use anyhow::{Context, bail};
     use std::{path::PathBuf, time::Duration};
     use tokio::time::sleep;
 

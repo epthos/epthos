@@ -6,6 +6,8 @@ use tokio::{
     task::{JoinHandle, LocalSet},
 };
 
+use crate::fatal::{self, Fatal};
+
 // The singly-threaded code is accessed by sending Operations.
 pub trait Solo {
     /// Typically, an enum with all supported operations.
@@ -13,7 +15,7 @@ pub trait Solo {
 
     // Perform the work. When using start() below, this will be executed in a
     // single thread.
-    async fn run(self, rx: Receiver<Self::Operation>) -> anyhow::Result<()>;
+    async fn run(self, rx: Receiver<Self::Operation>) -> fatal::Result<()>;
 }
 
 pub struct Handle<O> {
@@ -60,7 +62,10 @@ where
             // whole process instead of just failing this thread), or we
             // raise a single fresh panic from a clean (non-unwinding) result.
             match handle.await {
-                Ok(Ok(())) => {}
+                // Clean shutdown, the run function simply returned or used the
+                // quick bail-out option.
+                Ok(Ok(())) | Ok(Err(Fatal::Shutdown)) => {}
+                // The run function returned an internal error.
                 Ok(Err(err)) => panic!("Worker {} failed: {:?}", name, err),
                 Err(join_err) if join_err.is_panic() => {
                     std::panic::resume_unwind(join_err.into_panic())

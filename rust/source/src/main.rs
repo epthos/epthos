@@ -8,6 +8,7 @@ mod clock;
 mod datamanager;
 mod datastore;
 mod disk;
+mod fatal;
 mod filemanager;
 mod filestore;
 mod model;

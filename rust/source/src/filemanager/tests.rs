@@ -157,13 +157,13 @@ impl DataManager for FakeDataManager {
         &mut self.rx
     }
 
-    async fn in_flight(&mut self) -> anyhow::Result<Vec<InFlight>> {
+    async fn in_flight(&mut self) -> fatal::Result<Vec<InFlight>> {
         Ok(vec![])
     }
 }
 
 impl BackupSlot for FakeSlot {
-    async fn enqueue(self, _path: PathBuf) -> anyhow::Result<oneshot::Receiver<BackupResult>> {
+    async fn enqueue(self, _path: PathBuf) -> fatal::Result<oneshot::Receiver<BackupResult>> {
         todo!()
     }
 }
