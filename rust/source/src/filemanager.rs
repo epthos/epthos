@@ -153,33 +153,50 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
         // Backups currently in flight in the datamanager.
         let mut inflight_backups = self.sync_inflight_backups().await?;
         let mut backup_slots: VecDeque<DM::Slot> = VecDeque::new();
+        let mut op_stat = OpStat::default();
+        let mut op_stat_last = SystemTime::UNIX_EPOCH;
 
         // The work loop will continuously refresh the filesystem when a scan is
         // active, hash files that haven't changed in a while, and otherwise respond
         // to client requests. Its triggers are a mix of async events and time based
         // changes that the underlying filestore manages.
         loop {
-            tracing::debug!(
-                "loop with {} in flight backups and {} slots",
-                inflight_backups.len(),
-                backup_slots.len(),
-            );
             let now = self.clock.now();
+            if now > op_stat_last + Duration::from_secs(5) {
+                op_stat_last = now;
+                tracing::info!(
+                    "loop with {} in flight, {} slots and {:?}",
+                    inflight_backups.len(),
+                    backup_slots.len(),
+                    &op_stat,
+                );
+            }
 
             // Perform each possible non-blocking operation, and return the delay until
             // the next such work.
-            let hash_delay =
-                Runner::<S, D, C, DM>::next_hash(&self.disk, &self.clock, &mut self.store, now)?;
+            let hash_delay = Runner::<S, D, C, DM>::next_hash(
+                &self.disk,
+                &self.clock,
+                &mut self.store,
+                now,
+                &mut op_stat.hash,
+            )?;
             let backup_delay = Runner::<S, D, C, DM>::next_backup(
                 &self.clock,
                 &mut self.store,
                 now,
                 &mut backup_slots,
                 &mut inflight_backups,
+                &mut op_stat.backup_start,
             )
             .await?;
-            let scan_delay =
-                Runner::<S, D, C, DM>::next_scan(&self.disk, &self.clock, &mut self.store, now)?;
+            let scan_delay = Runner::<S, D, C, DM>::next_scan(
+                &self.disk,
+                &self.clock,
+                &mut self.store,
+                now,
+                &mut op_stat.scan,
+            )?;
 
             tokio::select! {
                 // Cancellations management.
@@ -189,6 +206,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                 }
                 // Avoid re-polling if we already cancelled, as this causes a panic.
                 watcher_result = &mut self.watcher_handle, if !self.token.is_cancelled() => {
+                    tracing::debug!("Watch Handle completed, shutting down");
                     self.token.cancel();
                     watcher_result.context("Watcher")?;
                 }
@@ -215,12 +233,13 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
 
                 // Slots management: monitor completion and availability.
                 done = inflight_backups.next() => {
-                    tracing::info!("backup completed: {:?}", &done);
+                    op_stat.backup_done += 1;
                     self.store.backup_done(done.path, self.clock.now(), done.update)?;
                 }
                 slot = self.datamanager.backup_slots().recv() => {
                     match slot {
                         Some(slot) => {
+                            op_stat.backup_slot += 1;
                             backup_slots.push_back(slot);
                         },
                         None => {
@@ -232,6 +251,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                 // This can be unbounded. Goes last so it doesn't take away work from the rest.
                 update = self.watcher.next().recv() => {
                     tracing::debug!("handling watcher operation {:?}", &update);
+                    op_stat.watcher += 1;
                     match update {
                         None => {
                             tracing::error!("watcher died...");
@@ -272,11 +292,13 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         clock: &'b C,
         store: &mut S,
         now: SystemTime,
+        op_stat: &mut u64,
     ) -> anyhow::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
         const NAME: &str = "hash";
         match store.hash_next(now)? {
             Next::Next(file, ()) => {
-                tracing::debug!("hashing stale file {:?}", &file);
+                *op_stat += 1;
+                tracing::trace!("hashing stale file {:?}", &file);
                 // TODO: this can take arbitrarily long and prevent shutdown /
                 // stale other operations.
                 let update = match disk::snapshot(disk, &file) {
@@ -298,6 +320,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         now: SystemTime,
         backup_slots: &mut VecDeque<DM::Slot>,
         inflight_backups: &mut VecFutures<BackupResult>,
+        op_stat: &mut u64,
     ) -> anyhow::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
         const NAME: &str = "backup";
         if backup_slots.is_empty() {
@@ -306,7 +329,8 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         }
         match store.backup_next(now)? {
             Next::Next(path, _egroup) => {
-                tracing::info!("starting new backup for {:?}", &path);
+                *op_stat += 1;
+                tracing::trace!("starting new backup for {:?}", &path);
                 let slot = backup_slots.pop_front().unwrap();
                 // We enqueue first, so that if there is a crash we can use _running_ backups to
                 // fill in the list of _started_ backups, without waiting for the backup queue.
@@ -326,14 +350,16 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         clock: &'b C,
         store: &mut S,
         now: SystemTime,
+        op_stat: &mut u64,
     ) -> anyhow::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
         const NAME: &str = "tree_scan";
         match store.tree_scan_next()? {
             Next::Done(delay) => Ok(clock.sleep(to_duration(now, delay), NAME)),
             Next::Next(dir, mut updater) => {
+                *op_stat += 1;
+                tracing::trace!("scanning {:?}", &dir);
                 // TODO: this can take arbitrarily long and prevent shutdown /
                 // stale other operations.
-                tracing::debug!("scanning {:?}", &dir);
                 match disk.scan(&dir) {
                     Ok(subdirs) => {
                         let mut complete = true;
@@ -389,6 +415,17 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         }
         Ok(pending_backups)
     }
+}
+
+// Count of various operations being performed, for logging.
+#[derive(Default, Debug, PartialEq)]
+struct OpStat {
+    scan: u64,
+    hash: u64,
+    backup_start: u64,
+    backup_done: u64,
+    backup_slot: u64,
+    watcher: u64,
 }
 
 fn to_duration(now: SystemTime, delay: SystemTime) -> Duration {
