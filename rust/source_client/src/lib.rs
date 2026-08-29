@@ -16,6 +16,7 @@ pub trait Source {
     async fn get_stats(&mut self) -> anyhow::Result<Stats>;
 }
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct Stats {
     pub state_info: HashMap<String, u32>,
 }

@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crypto::{self, RandomApi, model};
 use settings::{client, connection, process};
-use source_proto::{GetStatsReply, GetStatsRequest, source_client::SourceClient};
+use source_client::Source;
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -10,7 +10,6 @@ use std::{
 use storage::{filesystem, fingerprint, layout};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tonic::transport::{Channel, ClientTlsConfig};
 
 const CHUNK_SIZE: usize = 2usize.pow(10);
 
@@ -225,31 +224,14 @@ fn client(
         .save(&anchor)
 }
 
-pub async fn source_client(
-    client: &connection::Info,
-    server: &client::Settings,
-) -> anyhow::Result<SourceClient<Channel>> {
-    let tls = ClientTlsConfig::new()
-        .domain_name(server.name())
-        .ca_certificate(client.peer_root().clone())
-        .identity(client.identity().clone());
-    // Connect lazily so that regular retries handle transient issues rather than having to do it
-    // at creation as well.
-    let channel = Channel::builder(server.address().clone())
-        .tls_config(tls.clone())?
-        .connect_lazy();
-
-    Ok(SourceClient::new(channel))
-}
-
 async fn status(source: &client::Settings, info: &connection::Info) -> anyhow::Result<()> {
-    let mut client = source_client(info, source).await?;
-
-    let stats: GetStatsReply = client
-        .get_stats(GetStatsRequest::default())
-        .await?
-        .into_inner();
-    println!("Per state info: {:?}", stats.state_info);
+    let mut client = source_client::new(info, source).await?;
+    let mut stats: Vec<(String, u32)> = client.get_stats().await?.state_info.into_iter().collect();
+    stats.sort_by(|a, b| a.0.cmp(&b.0));
+    println!("Per state info:");
+    for (state, count) in stats {
+        println!("  {}: {}", &state, count);
+    }
     Ok(())
 }
 

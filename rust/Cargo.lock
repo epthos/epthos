@@ -396,7 +396,7 @@ dependencies = [
  "crypto",
  "settings",
  "sink_settings",
- "source_proto",
+ "source_client",
  "source_settings",
  "storage",
  "thiserror 2.0.18",

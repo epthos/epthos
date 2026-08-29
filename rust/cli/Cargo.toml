@@ -10,7 +10,7 @@ crypto = { path = "../crypto" }
 settings = { path = "../settings" }
 sink_settings = { path = "../sink_settings" }
 source_settings = { path = "../source_settings" }
-source_proto = { path = "../source_proto" }
+source_client = { path = "../source_client" }
 storage = { path = "../storage" }
 
 anyhow = "1"
