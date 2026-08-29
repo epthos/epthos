@@ -7,7 +7,7 @@ use crate::{
     disk::{self, Disk, Snapshot},
     fatal::{self, Shutdown},
     filestore::HashUpdate,
-    model::FileHashBuilder,
+    model::{FileHashBuilder, FileMetadata},
     solo::{self, Solo},
 };
 use anyhow::Context;
@@ -251,8 +251,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                 self.store.remove(p.path.clone().into())?;
                                 let snapshot = Snapshot {
                                     hash: p.hash_builder.finish(),
-                                    fsize,
-                                    mtime,
+                                    md: FileMetadata { fsize, mtime },
                                 };
                                 let result = HashUpdate::Hash(snapshot);
                                 bail_fatal!(p.tx.send(BackupResult { path: p.path, update: result }).shutdown());                                remaining += 1;

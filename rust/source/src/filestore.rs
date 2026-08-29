@@ -4,12 +4,12 @@
 //! to ensure testability and isolation.
 use crate::{
     disk::{DiskError, ScanEntry, Snapshot},
-    model::{FileSize, ModificationTime, Stats},
+    model::{FileMetadata, Stats},
     sql_model::LocalPath,
 };
 use anyhow::{Context, bail};
 use crypto::{SharedRandom, model::EncryptionGroup};
-use field::{StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds};
+use field::{StoredEncryptionGroup, StoredFileHash};
 use file::{Busy, Clean, Dirty, New, State, Unreadable};
 use rusqlite::Transaction;
 use rusqlite_migration::Migrations;
@@ -118,8 +118,7 @@ pub trait Filestore {
         &mut self,
         path: PathBuf,
         now: SystemTime,
-        fsize: FileSize,
-        mtime: ModificationTime,
+        md: FileMetadata,
     ) -> anyhow::Result<()>;
 
     /// Get the next file to back up, if any is due.
@@ -386,8 +385,7 @@ impl Filestore for Connection {
                                 next: (now + self.timing.cool_off_period.0).into(),
                                 // In such cases, there is no reason to delay the backup, as no previous one took place.
                                 threshold: (now + self.timing.cool_off_period.1).into(),
-                                fsize: snapshot.fsize,
-                                mtime: snapshot.mtime.into(),
+                                md: snapshot.md,
                                 hash: snapshot.hash.into(),
                                 // TODO: we probably want to reuse the same egroup when
                                 // going from UNREADABLE back to readable?
@@ -404,12 +402,8 @@ impl Filestore for Connection {
                     // This is the only conditional case: if the information has not changed,
                     // the file is still CLEAN.
                     State::Clean(mut old) => {
-                        let mtime: TimeInMicroseconds = snapshot.mtime.into();
                         let hash: StoredFileHash = snapshot.hash.into();
-                        let next_state = if hash != old.hash
-                            || mtime != old.mtime
-                            || snapshot.fsize != old.fsize
-                        {
+                        let next_state = if hash != old.hash || snapshot.md != old.md {
                             // Clean.threshold represents the earlier we can back up the file.
                             let earliest_backup = max(
                                 old.threshold.into_inner(),
@@ -419,8 +413,7 @@ impl Filestore for Connection {
                             State::Dirty(Dirty {
                                 next: earliest_backup.into(),
                                 threshold: latest_backup.into(),
-                                fsize: snapshot.fsize,
-                                mtime,
+                                md: snapshot.md,
                                 hash,
                                 egroup: old.egroup,
                             })
@@ -454,25 +447,14 @@ impl Filestore for Connection {
         &mut self,
         path: PathBuf,
         next: SystemTime,
-        fsize: FileSize,
-        mtime: ModificationTime,
+        md: FileMetadata,
     ) -> anyhow::Result<()> {
         let file_repr: LocalPath = path.into();
-        let mtime: TimeInMicroseconds = mtime.into();
         let mut tx = self.conn.transaction()?;
         // Place the file in the current tree gen for the case where it's new.
         // This confirms that we "just" saw the file.
         let tree_gen = settings::get_int(&tx, SETTING_TREE_GEN)?.unwrap_or(0);
-        metadata_update(
-            &mut tx,
-            &file_repr,
-            next,
-            None,
-            tree_gen,
-            fsize,
-            mtime,
-            &self.timing,
-        )?;
+        metadata_update(&mut tx, &file_repr, next, None, tree_gen, md, &self.timing)?;
         tx.commit()?;
         Ok(())
     }
@@ -547,8 +529,7 @@ impl Filestore for Connection {
                     State::Clean(Clean {
                         next: hash_next.into(),
                         threshold: earliest_backup.into(),
-                        fsize: snapshot.fsize,
-                        mtime: snapshot.mtime.into(),
+                        md: snapshot.md,
                         hash: snapshot.hash.into(),
                         egroup: busy.egroup,
                     })
@@ -597,17 +578,15 @@ impl Scanner for UpdaterImpl<'_> {
                     directory::insert(&self.tx, &path, self.aim)?;
                 }
             }
-            ScanEntry::File(file, fsize, mtime) => {
+            ScanEntry::File(file, md) => {
                 let path: LocalPath = dir.join(file).into();
-                let mtime: TimeInMicroseconds = (*mtime).into();
                 metadata_update(
                     &mut self.tx,
                     &path,
                     now,
                     Some(self.aim),
                     self.aim,
-                    *fsize,
-                    mtime,
+                    md.clone(),
                     &self.timing,
                 )?;
             }
@@ -633,7 +612,7 @@ fn pick_egroup(
     snapshot: &Snapshot,
     rand: SharedRandom,
 ) -> anyhow::Result<StoredEncryptionGroup> {
-    if snapshot.fsize < SMALLEST_INDEPENDENT_FILE {
+    if snapshot.md.fsize < SMALLEST_INDEPENDENT_FILE {
         // Isolate small files. They don't really represent a big savings
         // opportunity, and this avoids weird cases of small files growing
         // which start as identical but diverge quickly, still being in the
@@ -656,8 +635,7 @@ fn metadata_update(
     now: SystemTime,
     tree_gen: Option<i64>,
     fallback_tree_gen: i64,
-    fsize: FileSize,
-    mtime: TimeInMicroseconds,
+    md: FileMetadata,
     timing: &Timing,
 ) -> anyhow::Result<()> {
     let Some(state) = file::get_state(tx, path)? else {
@@ -670,7 +648,7 @@ fn metadata_update(
         // still update the tree_gen to show that the file is still around.
         State::New(_) | State::Busy(_) => state.state,
         State::Dirty(mut current) => {
-            if current.mtime != mtime || current.fsize != fsize {
+            if current.md != md {
                 current.next = min(
                     current.threshold.into_inner(),
                     now + timing.cool_off_period.0,
@@ -681,7 +659,7 @@ fn metadata_update(
         }
         // We might have enough information to know if the file is dirty again.
         State::Clean(clean) => {
-            if clean.mtime != mtime || clean.fsize != fsize {
+            if clean.md != md {
                 // TODO: this is the same as hash_update in many ways.
                 let earliest_backup =
                     max(clean.threshold.into_inner(), now + timing.cool_off_period.0);
@@ -690,8 +668,7 @@ fn metadata_update(
                 State::Dirty(Dirty {
                     next: earliest_backup.into(),
                     threshold: latest_backup.into(),
-                    fsize,
-                    mtime,
+                    md,
                     hash: clean.hash,
                     egroup: clean.egroup,
                 })

@@ -4,7 +4,10 @@ use super::{
     Snapshot,
     field::{FileState, StoredEncryptionGroup, StoredFileHash, TimeInMicroseconds, TimeInSeconds},
 };
-use crate::{model::FileSize, sql_model::LocalPath};
+use crate::{
+    model::{FileMetadata, FileSize},
+    sql_model::LocalPath,
+};
 use anyhow::{Context, anyhow};
 use rusqlite::{OptionalExtension, Transaction, named_params, types::FromSqlError};
 use rusqlite_migration::M;
@@ -74,10 +77,7 @@ pub struct Dirty {
     // Latest time a changing file can be postponed for backup.
     pub threshold: TimeInSeconds,
     // Current snapshot of the file.
-    // TODO: do we want better types here to have the shallow and deep state
-    // explicitly spelled out?
-    pub fsize: FileSize,
-    pub mtime: TimeInMicroseconds,
+    pub md: FileMetadata,
     pub hash: StoredFileHash,
     // How should the file be encrypted.
     pub egroup: StoredEncryptionGroup,
@@ -100,8 +100,7 @@ pub struct Clean {
     // Earliest time the file could be backed up again.
     pub threshold: TimeInSeconds,
     // Snapshot of the file at the time it was last backed up.
-    pub fsize: FileSize,
-    pub mtime: TimeInMicroseconds,
+    pub md: FileMetadata,
     pub hash: StoredFileHash,
     // How should the file be encrypted.
     pub egroup: StoredEncryptionGroup,
@@ -221,7 +220,7 @@ pub fn set_state(
     let next;
     let mut threshold = None;
     let mut fsize = None;
-    let mut mtime = None;
+    let mut mtime: Option<TimeInMicroseconds> = None;
     let mut egroup = None;
     let mut hash = None;
     let mut access_error = None;
@@ -233,8 +232,8 @@ pub fn set_state(
         State::Dirty(state) => {
             next = Some(&state.next);
             threshold = Some(&state.threshold);
-            fsize = Some(&state.fsize);
-            mtime = Some(&state.mtime);
+            fsize = Some(&state.md.fsize);
+            mtime = Some(state.md.mtime.into());
             egroup = Some(&state.egroup);
             hash = Some(&state.hash);
             FileState::Dirty
@@ -242,8 +241,8 @@ pub fn set_state(
         State::Busy(busy) => {
             next = Some(&busy.dirty.next);
             threshold = Some(&busy.dirty.threshold);
-            fsize = Some(&busy.dirty.fsize);
-            mtime = Some(&busy.dirty.mtime);
+            fsize = Some(&busy.dirty.md.fsize);
+            mtime = Some(busy.dirty.md.mtime.into());
             egroup = Some(&busy.dirty.egroup);
             hash = Some(&busy.dirty.hash);
             FileState::Busy
@@ -251,8 +250,8 @@ pub fn set_state(
         State::Clean(state) => {
             next = Some(&state.next);
             threshold = Some(&state.threshold);
-            fsize = Some(&state.fsize);
-            mtime = Some(&state.mtime);
+            fsize = Some(&state.md.fsize);
+            mtime = Some(state.md.mtime.into());
             egroup = Some(&state.egroup);
             hash = Some(&state.hash);
             FileState::Clean
@@ -323,12 +322,16 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
                     threshold: threshold.ok_or_else(|| {
                         FromSqlError::Other(anyhow!("missing threshold field").into())
                     })?,
-                    fsize: fsize.ok_or_else(|| {
-                        FromSqlError::Other(anyhow!("missing fsize field").into())
-                    })?,
-                    mtime: mtime.ok_or_else(|| {
-                        FromSqlError::Other(anyhow!("missing mtime field").into())
-                    })?,
+                    md: FileMetadata {
+                        fsize: fsize.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing fsize field").into())
+                        })?,
+                        mtime: mtime
+                            .ok_or_else(|| {
+                                FromSqlError::Other(anyhow!("missing mtime field").into())
+                            })?
+                            .into_inner(),
+                    },
                     hash: hash
                         .ok_or_else(|| FromSqlError::Other(anyhow!("missing hash field").into()))?,
                     egroup: egroup.ok_or_else(|| {
@@ -344,12 +347,16 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
                         threshold: threshold.ok_or_else(|| {
                             FromSqlError::Other(anyhow!("missing threshold field").into())
                         })?,
-                        fsize: fsize.ok_or_else(|| {
-                            FromSqlError::Other(anyhow!("missing fsize field").into())
-                        })?,
-                        mtime: mtime.ok_or_else(|| {
-                            FromSqlError::Other(anyhow!("missing mtime field").into())
-                        })?,
+                        md: FileMetadata {
+                            fsize: fsize.ok_or_else(|| {
+                                FromSqlError::Other(anyhow!("missing fsize field").into())
+                            })?,
+                            mtime: mtime
+                                .ok_or_else(|| {
+                                    FromSqlError::Other(anyhow!("missing mtime field").into())
+                                })?
+                                .into_inner(),
+                        },
                         hash: hash.ok_or_else(|| {
                             FromSqlError::Other(anyhow!("missing hash field").into())
                         })?,
@@ -368,12 +375,16 @@ pub fn get_state(txn: &Transaction, path: &LocalPath) -> anyhow::Result<Option<F
                     threshold: threshold.ok_or_else(|| {
                         FromSqlError::Other(anyhow!("missing threshold field").into())
                     })?,
-                    fsize: fsize.ok_or_else(|| {
-                        FromSqlError::Other(anyhow!("missing fsize field").into())
-                    })?,
-                    mtime: mtime.ok_or_else(|| {
-                        FromSqlError::Other(anyhow!("missing mtime field").into())
-                    })?,
+                    md: FileMetadata {
+                        fsize: fsize.ok_or_else(|| {
+                            FromSqlError::Other(anyhow!("missing fsize field").into())
+                        })?,
+                        mtime: mtime
+                            .ok_or_else(|| {
+                                FromSqlError::Other(anyhow!("missing mtime field").into())
+                            })?
+                            .into_inner(),
+                    },
                     hash: hash
                         .ok_or_else(|| FromSqlError::Other(anyhow!("missing hash field").into()))?,
                     egroup: egroup.ok_or_else(|| {
@@ -407,7 +418,7 @@ pub fn matching_egroup(
             FROM File WHERE hash = :hash AND fsize = :fsize
             LIMIT 1
         "#,
-        rusqlite::named_params! {":fsize": snapshot.fsize, ":hash": hash},
+        rusqlite::named_params! {":fsize": snapshot.md.fsize, ":hash": hash},
         |row| {
             let egroup: StoredEncryptionGroup = row.get(0)?;
             Ok(egroup)

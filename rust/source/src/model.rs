@@ -6,6 +6,12 @@ pub type FileSize = u64;
 /// Modification time, read from the filesystem.
 pub type ModificationTime = SystemTime;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileMetadata {
+    pub fsize: FileSize,
+    pub mtime: ModificationTime,
+}
+
 /// File chunk.
 #[derive(Debug, PartialEq)]
 pub enum Chunk {

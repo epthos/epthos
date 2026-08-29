@@ -57,8 +57,10 @@ fn scan_entry(entry: std::io::Result<DirEntry>, path: &Path) -> Result<ScanEntry
         let md = entry.metadata().disk(path, "metadata")?;
         Ok(ScanEntry::File(
             entry.file_name(),
-            md.len(),
-            md.modified().disk(path, "modified")?,
+            FileMetadata {
+                fsize: md.len(),
+                mtime: md.modified().disk(path, "modified")?,
+            },
         ))
     } else if file_type.is_dir() {
         Ok(ScanEntry::Directory(entry.file_name()))

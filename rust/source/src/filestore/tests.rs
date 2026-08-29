@@ -1,4 +1,9 @@
-use super::{directory::pth as dh, field::TimeInSeconds, file::pth as fh, *};
+use super::{
+    directory::pth as dh,
+    field::{TimeInMicroseconds, TimeInSeconds},
+    file::pth as fh,
+    *,
+};
 use crate::{
     filestore::file::File,
     model::{FileHash, FileHashBuilder},
@@ -63,7 +68,16 @@ fn tree_scan_sequence() -> anyhow::Result<()> {
     let hash_time = t(3210);
     let f1: OsString = "f1".into();
     let f1_modtime = t(1000);
-    updater.update(hash_time, &ScanEntry::File(f1, 100, f1_modtime))?;
+    updater.update(
+        hash_time,
+        &ScanEntry::File(
+            f1,
+            FileMetadata {
+                fsize: 100,
+                mtime: f1_modtime,
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     // Move on to the next directory.
@@ -137,8 +151,26 @@ fn tree_rescan() -> anyhow::Result<()> {
 
     // f2 disappeared, f3 appeared.
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(t2, &ScanEntry::File("f1".into(), 3, t(300)))?;
-    updater.update(t2, &ScanEntry::File("f3".into(), 4, t(400)))?;
+    updater.update(
+        t2,
+        &ScanEntry::File(
+            "f1".into(),
+            FileMetadata {
+                fsize: 3,
+                mtime: t(300),
+            },
+        ),
+    )?;
+    updater.update(
+        t2,
+        &ScanEntry::File(
+            "f3".into(),
+            FileMetadata {
+                fsize: 4,
+                mtime: t(400),
+            },
+        ),
+    )?;
     updater.update(t2, &ScanEntry::Directory("d1".into()))?;
     updater.update(t2, &ScanEntry::Directory("d3".into()))?;
     updater.commit(true)?;
@@ -205,7 +237,16 @@ fn tree_update_drop_is_noop() -> anyhow::Result<()> {
     cnx.tree_scan_start(t(0))?;
     {
         let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-        updater.update(t(100), &ScanEntry::File("b".into(), 1, t(200)))?;
+        updater.update(
+            t(100),
+            &ScanEntry::File(
+                "b".into(),
+                FileMetadata {
+                    fsize: 1,
+                    mtime: t(200),
+                },
+            ),
+        )?;
     }
     // Despite the update(File()) above, the lack of commit means the db was not
     // altered.
@@ -270,7 +311,16 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
     // Make a/b a file first.
     let t1 = t(100);
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(t1, &ScanEntry::File(b.clone(), 1, t(1)))?;
+    updater.update(
+        t1,
+        &ScanEntry::File(
+            b.clone(),
+            FileMetadata {
+                fsize: 1,
+                mtime: t(1),
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     cnx.tree_scan_start(SystemTime::UNIX_EPOCH)?;
@@ -300,7 +350,16 @@ fn tree_scan_node_type_change() -> anyhow::Result<()> {
 
     let t2 = t(200);
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(t2, &ScanEntry::File(b.clone(), 1, t(1)))?;
+    updater.update(
+        t2,
+        &ScanEntry::File(
+            b.clone(),
+            FileMetadata {
+                fsize: 1,
+                mtime: t(1),
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     // The file is back on the scan.
@@ -350,7 +409,16 @@ fn hash_next() -> anyhow::Result<()> {
 
     cnx.tree_scan_start(t(86400))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(hash_time, &ScanEntry::File("f1".into(), 1, t(10)))?;
+    updater.update(
+        hash_time,
+        &ScanEntry::File(
+            "f1".into(),
+            FileMetadata {
+                fsize: 1,
+                mtime: t(10),
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     // From now on, file a/f1 is in the database, but with no hash yet.
@@ -376,8 +444,7 @@ fn hash_next() -> anyhow::Result<()> {
         file,
         hash_time,
         HashUpdate::Hash(Snapshot {
-            fsize,
-            mtime,
+            md: FileMetadata { fsize, mtime },
             hash: hash.clone(),
         }),
     )?;
@@ -400,8 +467,7 @@ fn hash_next() -> anyhow::Result<()> {
                 state: State::Dirty(Dirty {
                     next: (hash_time + timing.cool_off_period.0).into(),
                     threshold: (hash_time + timing.cool_off_period.1).into(),
-                    fsize,
-                    mtime: mtime.into(),
+                    md: FileMetadata { fsize, mtime },
                     hash: hash.into(),
                     egroup: egroup.into(),
                 })
@@ -427,8 +493,26 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
     cnx.set_roots(&[a])?;
     cnx.tree_scan_start(t(0))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(hash_time, &ScanEntry::File("f1".into(), 1, t(0)))?;
-    updater.update(hash_time, &ScanEntry::File("f2".into(), 1, t(0)))?;
+    updater.update(
+        hash_time,
+        &ScanEntry::File(
+            "f1".into(),
+            FileMetadata {
+                fsize: 1,
+                mtime: t(0),
+            },
+        ),
+    )?;
+    updater.update(
+        hash_time,
+        &ScanEntry::File(
+            "f2".into(),
+            FileMetadata {
+                fsize: 1,
+                mtime: t(0),
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     let fsize = 100;
@@ -438,8 +522,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
         a.join("f1"),
         hash_time,
         HashUpdate::Hash(Snapshot {
-            fsize,
-            mtime,
+            md: FileMetadata { fsize, mtime },
             hash: hash.clone(),
         }),
     )?;
@@ -447,8 +530,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
         a.join("f2"),
         hash_time,
         HashUpdate::Hash(Snapshot {
-            fsize,
-            mtime,
+            md: FileMetadata { fsize, mtime },
             hash: hash.clone(),
         }),
     )?;
@@ -464,8 +546,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                     state: State::Dirty(Dirty {
                         next: (hash_time + timing.cool_off_period.0).into(),
                         threshold: (hash_time + timing.cool_off_period.1).into(),
-                        fsize,
-                        mtime: mtime.into(),
+                        md: FileMetadata { fsize, mtime },
                         hash: hash.clone().into(),
                         egroup: eg1.into(),
                     })
@@ -478,8 +559,7 @@ fn small_files_dont_share_egroups() -> anyhow::Result<()> {
                     state: State::Dirty(Dirty {
                         next: (hash_time + timing.cool_off_period.0).into(),
                         threshold: (hash_time + timing.cool_off_period.1).into(),
-                        fsize,
-                        mtime: mtime.into(),
+                        md: FileMetadata { fsize, mtime },
                         hash: hash.clone().into(),
                         egroup: eg2.into(),
                     })
@@ -502,8 +582,26 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
     cnx.set_roots(&[a])?;
     cnx.tree_scan_start(t(0))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
-    updater.update(t(0), &ScanEntry::File("f1".into(), 1, t(0)))?;
-    updater.update(t(0), &ScanEntry::File("f2".into(), 1, t(0)))?;
+    updater.update(
+        t(0),
+        &ScanEntry::File(
+            "f1".into(),
+            FileMetadata {
+                fsize: 1,
+                mtime: t(0),
+            },
+        ),
+    )?;
+    updater.update(
+        t(0),
+        &ScanEntry::File(
+            "f2".into(),
+            FileMetadata {
+                fsize: 1,
+                mtime: t(0),
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     let hash_time = t(100);
@@ -514,8 +612,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
         a.join("f1"),
         hash_time,
         HashUpdate::Hash(Snapshot {
-            fsize,
-            mtime,
+            md: FileMetadata { fsize, mtime },
             hash: hash.clone(),
         }),
     )?;
@@ -523,8 +620,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
         a.join("f2"),
         hash_time,
         HashUpdate::Hash(Snapshot {
-            fsize,
-            mtime,
+            md: FileMetadata { fsize, mtime },
             hash: hash.clone(),
         }),
     )?;
@@ -540,8 +636,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                     state: State::Dirty(Dirty {
                         next: (hash_time + timing.cool_off_period.0).into(),
                         threshold: (hash_time + timing.cool_off_period.1).into(),
-                        fsize,
-                        mtime: mtime.into(),
+                        md: FileMetadata { fsize, mtime },
                         hash: hash.clone().into(),
                         egroup: egroup.clone().into(),
                     })
@@ -554,8 +649,7 @@ fn large_identical_files_share_egroups() -> anyhow::Result<()> {
                     state: State::Dirty(Dirty {
                         next: (hash_time + timing.cool_off_period.0).into(),
                         threshold: (hash_time + timing.cool_off_period.1).into(),
-                        fsize,
-                        mtime: mtime.into(),
+                        md: FileMetadata { fsize, mtime },
                         hash: hash.clone().into(),
                         egroup: egroup.into(),
                     })
@@ -574,7 +668,14 @@ fn metadata_update_adds_file() -> anyhow::Result<()> {
     let next = t(321);
     // We can drop random metadata for a file, and it'll be added as New right
     // away.
-    cnx.metadata_update(a.to_owned(), next, 100, t(11))?;
+    cnx.metadata_update(
+        a.to_owned(),
+        next,
+        FileMetadata {
+            fsize: 100,
+            mtime: t(11),
+        },
+    )?;
 
     let got = fh::dump(cnx.conn())?;
     assert_eq!(
@@ -613,7 +714,16 @@ fn scan_update_advance_tree_gen() -> anyhow::Result<()> {
     cnx.tree_scan_start(t(200))?;
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "new".into();
-    updater.update(scan_next, &ScanEntry::File(f1, 100, t(321)))?;
+    updater.update(
+        scan_next,
+        &ScanEntry::File(
+            f1,
+            FileMetadata {
+                fsize: 100,
+                mtime: t(321),
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     let got = fh::dump(cnx.conn())?;
@@ -650,7 +760,16 @@ fn full_cycle() -> anyhow::Result<()> {
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "f1".into();
     let f1_modtime = now + Duration::from_secs(231);
-    updater.update(now, &ScanEntry::File(f1, 100, f1_modtime))?;
+    updater.update(
+        now,
+        &ScanEntry::File(
+            f1,
+            FileMetadata {
+                fsize: 100,
+                mtime: f1_modtime,
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     let (to_hash, _) = cnx.hash_next(now)?.next()?;
@@ -658,8 +777,10 @@ fn full_cycle() -> anyhow::Result<()> {
 
     let hash: FileHash = digest::digest(&digest::SHA256, b"boo").into();
     let snapshot = Snapshot {
-        fsize: 100,
-        mtime: f1_modtime,
+        md: FileMetadata {
+            fsize: 100,
+            mtime: f1_modtime,
+        },
         hash: hash.clone(),
     };
     cnx.hash_update(to_hash, now, HashUpdate::Hash(snapshot.clone()))?;
@@ -703,7 +824,16 @@ fn hash_update_progression() -> anyhow::Result<()> {
     let (_, mut updater) = cnx.tree_scan_next()?.next()?;
     let f1: OsString = "f1".into();
     let f1_modtime = now + Duration::from_secs(231);
-    updater.update(now, &ScanEntry::File(f1, 100, f1_modtime))?;
+    updater.update(
+        now,
+        &ScanEntry::File(
+            f1,
+            FileMetadata {
+                fsize: 100,
+                mtime: f1_modtime,
+            },
+        ),
+    )?;
     updater.commit(true)?;
 
     // File is ready to hash as of now.
@@ -711,8 +841,10 @@ fn hash_update_progression() -> anyhow::Result<()> {
     // The first hashing will necessarily make it Dirty for backup after |soon|.
     let hash: FileHash = digest::digest(&digest::SHA256, b"boo").into();
     let snapshot = Snapshot {
-        fsize: 100,
-        mtime: f1_modtime,
+        md: FileMetadata {
+            fsize: 100,
+            mtime: f1_modtime,
+        },
         hash: hash.clone(),
     };
     cnx.hash_update(path, now, HashUpdate::Hash(snapshot.clone()))?;
@@ -737,8 +869,10 @@ fn hash_update_progression() -> anyhow::Result<()> {
     let (path, _) = cnx.hash_next(now)?.next()?;
     let hash: FileHash = digest::digest(&digest::SHA256, b"boo again").into();
     let snapshot = Snapshot {
-        fsize: 100,
-        mtime: f1_modtime,
+        md: FileMetadata {
+            fsize: 100,
+            mtime: f1_modtime,
+        },
         hash: hash.clone(),
     };
     cnx.hash_update(path, now, HashUpdate::Hash(snapshot.clone()))?;
@@ -757,8 +891,10 @@ fn no_cool_off_with_hash_updates() -> anyhow::Result<()> {
     let initial_state = State::Dirty(Dirty {
         next: secs(1000),
         threshold: secs(2000),
-        fsize: 123,
-        mtime: usecs(321),
+        md: FileMetadata {
+            fsize: 123,
+            mtime: usecs(321).into_inner(),
+        },
         hash: hash.clone().into(),
         egroup: egroup(1).into(),
     });
@@ -770,8 +906,10 @@ fn no_cool_off_with_hash_updates() -> anyhow::Result<()> {
 
     // Hashing reports a change between next and threshold.
     let snapshot = Snapshot {
-        fsize: 456,
-        mtime: t(321),
+        md: FileMetadata {
+            fsize: 456,
+            mtime: t(321),
+        },
         hash: hash.clone(),
     };
     cnx.hash_update(f.clone(), t(1000), HashUpdate::Hash(snapshot.clone()))?;
@@ -802,8 +940,10 @@ fn cool_off_with_metadata_update() -> anyhow::Result<()> {
     let initial_state = Dirty {
         next: secs(1000),
         threshold: secs(2000),
-        fsize: 123,
-        mtime: usecs(321),
+        md: FileMetadata {
+            fsize: 123,
+            mtime: usecs(321).into_inner(),
+        },
         hash: hash.clone().into(),
         egroup: egroup(1).into(),
     };
@@ -817,7 +957,14 @@ fn cool_off_with_metadata_update() -> anyhow::Result<()> {
     )?;
 
     // Metadata reports a change between next and threshold.
-    cnx.metadata_update(f.clone(), t(1000), 123, t(444))?;
+    cnx.metadata_update(
+        f.clone(),
+        t(1000),
+        FileMetadata {
+            fsize: 123,
+            mtime: t(444),
+        },
+    )?;
 
     // This causes the backup time to be pushed later than now.
     let mut current_state = initial_state;
@@ -836,7 +983,14 @@ fn cool_off_with_metadata_update() -> anyhow::Result<()> {
     );
 
     // Metadata reports a change much closer to threshold.
-    cnx.metadata_update(f.clone(), t(1999), 123, t(888))?;
+    cnx.metadata_update(
+        f.clone(),
+        t(1999),
+        FileMetadata {
+            fsize: 123,
+            mtime: t(888),
+        },
+    )?;
 
     // The new backup time is capped at threshold.
     current_state.next = secs(2000);
@@ -895,8 +1049,10 @@ fn backup_cancel() -> anyhow::Result<()> {
     let dirty = Dirty {
         next: secs(100),
         threshold: secs(200),
-        fsize: 100,
-        mtime: usecs(10000),
+        md: FileMetadata {
+            fsize: 100,
+            mtime: usecs(10000).into_inner(),
+        },
         hash: FileHashBuilder::new().finish().into(),
         egroup: egroup(10).into(),
     };

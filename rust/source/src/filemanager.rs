@@ -8,7 +8,7 @@ use crate::{
     disk::{self, Disk},
     fatal::{self, Shutdown},
     filestore::{Connection, Filestore, HashUpdate, Next, Scanner, Timing},
-    model::Stats,
+    model::{FileMetadata, Stats},
     solo::{self, Solo},
     watcher,
 };
@@ -260,7 +260,8 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                         Some(watcher::Update::Directory(_)) => {},
                         Some(watcher::Update::File(path)) => {
                             if let Ok((fsize, mtime)) = self.disk.metadata(&path) {
-                                self.store.metadata_update(path, now, fsize, mtime)?;
+                                self.store
+                                    .metadata_update(path, now, FileMetadata { fsize, mtime })?;
                             }
                         },
                     }
@@ -313,9 +314,9 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
 
     /// Backup the next file that needs backing up, or return a sleep future until the
     /// next file is due. This takes into consideration available slots.
-    async fn next_backup<'b, 'c>(
+    async fn next_backup<'b>(
         clock: &'b C,
-        store: &'c mut S,
+        store: &mut S,
         now: SystemTime,
         backup_slots: &mut VecDeque<DM::Slot>,
         inflight_backups: &mut VecFutures<BackupResult>,

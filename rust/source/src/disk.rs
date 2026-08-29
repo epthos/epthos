@@ -1,5 +1,5 @@
 //! Abstracted disk operations.
-use crate::model::{Chunk, FileHash, FileHashBuilder, FileSize, ModificationTime};
+use crate::model::{Chunk, FileHash, FileHashBuilder, FileMetadata, FileSize, ModificationTime};
 use std::{
     ffi::OsString,
     io::{ErrorKind, Read},
@@ -27,14 +27,13 @@ pub trait Disk {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub hash: FileHash,
-    pub fsize: FileSize,
-    pub mtime: ModificationTime,
+    pub md: FileMetadata,
 }
 
 /// One result of scanning a directory.
 #[derive(Debug, PartialEq)]
 pub enum ScanEntry {
-    File(OsString, FileSize, ModificationTime),
+    File(OsString, FileMetadata),
     Directory(OsString),
 }
 
@@ -49,8 +48,7 @@ pub fn snapshot<D: Disk>(disk: &D, path: &Path) -> Result<Snapshot> {
 
     Ok(Snapshot {
         hash: file_hash.finish(),
-        fsize,
-        mtime,
+        md: FileMetadata { fsize, mtime },
     })
 }
 

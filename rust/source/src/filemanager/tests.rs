@@ -5,7 +5,7 @@ use crate::{
     fake_clock::Handler,
     fake_disk::FakeDisk,
     filestore::{self, HashUpdate, Next},
-    model::{FileSize, ModificationTime},
+    model::FileMetadata,
 };
 use crypto::model::EncryptionGroup;
 use std::{
@@ -276,8 +276,7 @@ impl Filestore for FakeFileStore {
         &mut self,
         _path: PathBuf,
         _now: SystemTime,
-        _fsize: FileSize,
-        _mtime: ModificationTime,
+        _md: FileMetadata,
     ) -> anyhow::Result<()> {
         todo!()
     }
