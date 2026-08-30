@@ -69,19 +69,19 @@ impl<P: Peer> Server<P> {
                 // no real way to continue at the moment.
                 tokio::select! {
                     r = &mut self.filemanager_context.handle => {
-                        tracing::info!("FileManager died");
+                        tracing::info!("FileManager stopped");
                         // Pull the ripcord lto ensure everything shuts down.
                         self.token.cancel();
                         filemanager_result = Some(r);
                     },
                     r = &mut self.datamanager_handle => {
-                        tracing::info!("DataManager died");
+                        tracing::info!("DataManager stopped");
                         // Pull the ripcord lto ensure everything shuts down.
                         self.token.cancel();
                         datamanager_result = Some(r);
                     },
                     r = &mut server => {
-                        tracing::info!("Server died");
+                        tracing::info!("Server stopped");
                         // Pull the ripcord to ensure everything shuts down.
                         self.token.cancel();
                         server_result = Some(r.context("SourceImpl"));

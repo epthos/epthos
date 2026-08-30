@@ -74,8 +74,7 @@ impl WatcherImpl {
                     Err(RecvTimeoutError::Timeout) => {
                         // This is fine, just giving a chance to cancel.
                     }
-                    Err(err) => {
-                        tracing::info!("failed to receive from WatcherImpl's copier: {:?}", err);
+                    Err(RecvTimeoutError::Disconnected) => {
                         break;
                     }
                 }
