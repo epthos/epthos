@@ -29,6 +29,7 @@ pub struct Server<P: Peer> {
     address: SocketAddr,
     roots: Vec<PathBuf>,
     _peer: P,
+    peer_handle: JoinHandle<()>,
     filemanager_context: filemanager::FileManagerContext,
     token: CancellationToken,
     datamanager_handle: JoinHandle<()>,
@@ -63,11 +64,18 @@ impl<P: Peer> Server<P> {
         let mut server_result = None;
         let mut filemanager_result = None;
         let mut datamanager_result = None;
+        let mut peer_result = None;
         match self.initialize().await {
             Ok(_) => {
                 // We stop the server at the first failure of a submodule, as there is
                 // no real way to continue at the moment.
                 tokio::select! {
+                    r = &mut server => {
+                        tracing::info!("Server stopped");
+                        // Pull the ripcord to ensure everything shuts down.
+                        self.token.cancel();
+                        server_result = Some(r.context("SourceImpl"));
+                    },
                     r = &mut self.filemanager_context.handle => {
                         tracing::info!("FileManager stopped");
                         // Pull the ripcord lto ensure everything shuts down.
@@ -80,12 +88,12 @@ impl<P: Peer> Server<P> {
                         self.token.cancel();
                         datamanager_result = Some(r);
                     },
-                    r = &mut server => {
-                        tracing::info!("Server stopped");
-                        // Pull the ripcord to ensure everything shuts down.
+                    r = &mut self.peer_handle => {
+                        tracing::info!("Peer stopped");
+                        // Pull the ripcord lto ensure everything shuts down.
                         self.token.cancel();
-                        server_result = Some(r.context("SourceImpl"));
-                    }
+                        peer_result = Some(r);
+                    },
                 }
             }
             Err(Fatal::Shutdown) => {
@@ -106,11 +114,15 @@ impl<P: Peer> Server<P> {
         if datamanager_result.is_none() {
             datamanager_result = Some(self.datamanager_handle.await);
         }
+        if peer_result.is_none() {
+            peer_result = Some(self.peer_handle.await);
+        }
 
         let mut errors = Errors::new();
         errors.collect(server_result.unwrap());
         errors.collect(filemanager_result.unwrap());
         errors.collect(datamanager_result.unwrap());
+        errors.collect(peer_result.unwrap());
         errors.as_result()
     }
 

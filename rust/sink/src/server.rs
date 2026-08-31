@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use broker_client::Broker;
+use error_collection::Errors;
 use rpcutil::auth::{self, AuthInterceptor};
 use settings::{client, connection};
 use sink_proto::{
@@ -9,6 +10,7 @@ use sink_proto::{
 use sink_settings::Settings;
 use std::net::{AddrParseError, SocketAddr};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tonic::{
     Request, Response, Status,
     transport::{self, ServerTlsConfig},
@@ -18,10 +20,12 @@ pub struct Server {
     address: SocketAddr,
     connection: connection::Info,
     broker: client::Settings,
+    token: CancellationToken,
 }
 
 #[derive(Default)]
 pub struct Builder {
+    token: CancellationToken,
     address: Option<SocketAddr>,
     broker_connection: Option<connection::Info>,
     broker: Option<client::Settings>,
@@ -40,6 +44,12 @@ pub enum BuilderError {
 }
 
 impl Builder {
+    pub fn new(token: CancellationToken) -> Self {
+        Builder {
+            token,
+            ..Builder::default()
+        }
+    }
     pub fn settings(self, settings: &Settings) -> Result<Builder, BuilderError> {
         Ok(self
             .connection(settings.connection())
@@ -69,19 +79,21 @@ impl Builder {
                 .broker_connection
                 .ok_or(BuilderError::MissingConnection)?,
             broker: self.broker.ok_or(BuilderError::MissingBrokerInfo)?,
+            token: self.token,
         })
     }
 }
 
 impl Server {
-    pub fn builder() -> Builder {
-        Builder::default()
+    pub fn builder(token: CancellationToken) -> Builder {
+        Builder::new(token)
     }
 
     pub async fn serve(&self) -> anyhow::Result<()> {
-        let mut broker = broker_client::new(&self.connection, &self.broker)
-            .await
-            .context("Failed to start the Broker")?;
+        let (mut broker, mut broker_handle) =
+            broker_client::new(&self.connection, &self.broker, self.token.child_token())
+                .await
+                .context("Failed to start the Broker")?;
 
         // Resolve the port we will listen on if it's not specified.
         // This is prone to race conditions in theory, not sure about practice.
@@ -109,17 +121,43 @@ impl Server {
 
         let sink = SinkImpl::default();
         let svc = SinkServer::with_interceptor(sink, AuthInterceptor::default());
-        transport::Server::builder()
+        let server = transport::Server::builder()
             .tls_config(
                 ServerTlsConfig::new()
                     .identity(self.connection.identity().clone())
                     .client_ca_root(self.connection.peer_root().clone()),
             )?
-            .add_service(svc)
-            .serve(addr)
-            .await?;
+            .add_service(svc);
 
-        Ok(())
+        let mut server =
+            Box::pin(server.serve_with_shutdown(addr, self.token.child_token().cancelled_owned()));
+
+        let mut server_result = None;
+        let mut broker_result = None;
+        tokio::select! {
+            r = &mut server => {
+                tracing::info!("Server stopped");
+                self.token.cancel();
+                server_result = Some(r.context("SinkImpl"));
+            }
+            r = &mut broker_handle => {
+                tracing::info!("Broker stopped");
+                self.token.cancel();
+                broker_result = Some(r);
+            }
+        }
+
+        if server_result.is_none() {
+            server_result = Some(server.await.context("SinkImpl"));
+        }
+        if broker_result.is_none() {
+            broker_result = Some(broker_handle.await);
+        }
+        let mut errors = Errors::new();
+        errors.collect(server_result.unwrap());
+        errors.collect(broker_result.unwrap());
+
+        errors.as_result()
     }
 }
 

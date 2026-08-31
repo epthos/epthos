@@ -14,6 +14,8 @@ use tokio::sync::{
     mpsc::{self, Receiver, Sender},
     oneshot,
 };
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tonic::async_trait;
 
 #[cfg(test)]
@@ -28,8 +30,20 @@ pub trait Peer {
 }
 
 /// Returns a new PeerImpl that will immediately start connecting to a Sink using id as its local identity.
-pub fn new(broker: BrokerImpl, id: connection::Info) -> PeerImpl {
-    PeerImpl::new(broker, SinkBuilderImpl, id, Params::default())
+pub fn new(
+    broker: BrokerImpl,
+    broker_handle: JoinHandle<()>,
+    token: CancellationToken,
+    id: connection::Info,
+) -> (PeerImpl, JoinHandle<()>) {
+    PeerImpl::new(
+        broker,
+        broker_handle,
+        token,
+        SinkBuilderImpl,
+        id,
+        Params::default(),
+    )
 }
 
 /// Default implementation of a Peer.
@@ -48,28 +62,37 @@ impl Peer for PeerImpl {
 
 impl PeerImpl {
     /// Returns a new Peer, with the given parameters.
-    fn new<B, S, K>(broker: B, sink_builder: S, id: connection::Info, params: Params) -> PeerImpl
+    fn new<B, S, K>(
+        broker: B,
+        broker_handle: JoinHandle<()>,
+        token: CancellationToken,
+        sink_builder: S,
+        id: connection::Info,
+        params: Params,
+    ) -> (PeerImpl, JoinHandle<()>)
     where
         B: Broker + std::marker::Send + std::marker::Sync + 'static,
         S: SinkBuilder<K> + std::marker::Send + std::marker::Sync + 'static,
         K: Sink + Sized + std::marker::Send + std::marker::Sync + 'static,
     {
         let (tx, rx) = mpsc::channel(1);
-        let mut actor = PeerActor {
+        let actor = PeerActor {
             rx,
             broker,
+            broker_handle,
+            token,
             sink_builder,
             id,
             params,
             sink: PhantomData,
         };
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(err) = actor.run().await {
                 tracing::error!("Peer failed: {:?}", err);
             }
         });
 
-        PeerImpl { tx }
+        (PeerImpl { tx }, handle)
     }
 }
 
@@ -85,6 +108,8 @@ where
 {
     rx: Receiver<PeerOp>,
     broker: B,
+    broker_handle: JoinHandle<()>,
+    token: CancellationToken,
     sink_builder: S,
     params: Params,
     id: connection::Info,
@@ -110,51 +135,90 @@ where
     S: SinkBuilder<K> + std::marker::Send + std::marker::Sync,
     K: Sink + Sized + std::marker::Send + std::marker::Sync,
 {
-    async fn run(&mut self) -> anyhow::Result<()> {
+    async fn run(mut self) -> anyhow::Result<()> {
         let mut state = ActorState::<K>::Connecting;
         loop {
-            match state {
-                ActorState::Connecting => state = ActorState::Connected(self.get_sink().await),
-                ActorState::Connected(sink) => state = self.serve_with_sink(sink).await,
-                ActorState::Done => break,
+            tokio::select! {
+                _ = self.token.cancelled() => {
+                    tracing::debug!("token cancelled");
+                    state = ActorState::Done;
+                }
+                done = &mut self.broker_handle, if !self.token.is_cancelled() => {
+                    tracing::debug!("broker is dead");
+                    self.token.cancel();
+                    done.context("Broker")?;
+                }
+                new = PeerActor::<B, S, K>::next_step(&state, &mut self.rx, &self.params.backoff, &self.broker, &self.sink_builder, &self.id) => {
+                    state = new;
+                }
+            }
+            if let ActorState::Done = state {
+                tracing::debug!("ActorState Done");
+                break;
             }
         }
-        tracing::info!("Peer shutting done.");
+        tracing::info!("Shutting done.");
         Ok(())
     }
 
+    async fn next_step(
+        state: &ActorState<K>,
+        rx: &mut Receiver<PeerOp>,
+        backoff: &Backoff,
+        broker: &B,
+        sink_builder: &S,
+        id: &connection::Info,
+    ) -> ActorState<K> {
+        match state {
+            ActorState::Done => ActorState::Done,
+            ActorState::Connecting => {
+                PeerActor::<B, S, K>::get_sink(backoff, broker, sink_builder, id).await
+            }
+            ActorState::Connected(sink) => {
+                PeerActor::<B, S, K>::serve_with_sink(sink.clone(), rx).await
+            }
+        }
+    }
     /// Serves requests on the given Sink. Returns true if there is no more work to do.
-    async fn serve_with_sink(&mut self, sink: Arc<K>) -> ActorState<K> {
+    async fn serve_with_sink(sink: Arc<K>, rx: &mut Receiver<PeerOp>) -> ActorState<K> {
         loop {
-            match self.rx.recv().await {
-                Some(PeerOp::Send(data, tx)) => {
-                    let result = sink.store(&data).await.context("Sink error");
+            tokio::select! {
+                op = rx.recv() => match op {
+                    Some(PeerOp::Send(data, tx)) => {
+                        let result = sink.store(&data).await.context("Sink error");
 
-                    // We might hide connection errors here to let the source find the new location of the sink.
-                    // TODO: only return on connection errors, surface other errors to the caller.
-                    if result.is_err() {
-                        tracing::info!("Failed to send chunk: {:?}", result);
-                        return ActorState::Connecting;
+                        // We might hide connection errors here to let the source find the new location of the sink.
+                        // TODO: only return on connection errors, surface other errors to the caller.
+                        if result.is_err() {
+                            tracing::info!("Failed to send chunk: {:?}", result);
+                            return ActorState::Connecting;
+                        }
+                        if let Err(err) = tx.send(result) {
+                            tracing::error!("Failed to send result to caller: {:?}", err);
+                        }
                     }
-                    if let Err(err) = tx.send(result) {
-                        tracing::error!("Failed to send result to caller: {:?}", err);
+                    None => {
+                        tracing::info!("Sink closed.");
+                        return ActorState::Done;
                     }
-                }
-                None => {
-                    tracing::info!("Sink closed.");
-                    return ActorState::Done;
                 }
             }
         }
     }
 
     /// Returns a Sink that can be used to send chunks to.
-    async fn get_sink(&self) -> Arc<K> {
-        let mut backoff: ExpBackoff = ExpBackoff::new(&self.params.backoff);
+    async fn get_sink(
+        backoff: &Backoff,
+        broker: &B,
+        sink_builder: &S,
+        id: &connection::Info,
+    ) -> ActorState<K> {
+        let mut backoff: ExpBackoff = ExpBackoff::new(backoff);
         loop {
-            match self.broker.get_peers().await {
-                Ok(peers) => match self.find_sink(&peers, &self.id).await {
-                    Some(sink) => return sink,
+            match broker.get_peers().await {
+                Ok(peers) => match PeerActor::<B, S, K>::find_sink(sink_builder, &peers, &id).await
+                {
+                    Some(sink) => return ActorState::Connected(sink),
                     None => tracing::debug!("No sink found, retrying."),
                 },
                 Err(err) => tracing::error!("Failed to get peers: {:?}", err),
@@ -167,14 +231,13 @@ where
     /// turn. Returns the first Sink for which the connection is established, None if none can be
     /// found.
     async fn find_sink(
-        &self,
+        sink_builder: &S,
         candidates: &Vec<SinkLocation>,
         connection: &connection::Info,
     ) -> Option<Arc<K>> {
         for candidate in candidates {
             for address in candidate.addresses() {
-                match self
-                    .sink_builder
+                match sink_builder
                     .connect(connection, candidate.id(), address.clone())
                     .await
                 {
@@ -242,6 +305,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn propagate_failure() -> anyhow::Result<()> {
+        let token = CancellationToken::new();
+        let handle = tokio::spawn({
+            let token = token.child_token();
+            async move {
+                token.cancelled().await;
+            }
+        });
         let mut mock_broker = MockBroker::new();
         let mut mock_sink_builder = MockSinkBuilder::<MockSink>::new();
 
@@ -264,8 +334,10 @@ mod tests {
             .withf(move |_, id, addr| id == "sink" && addr == "5.6.7.8")
             .returning(good_sink);
 
-        let peer = PeerImpl::new(
+        let (peer, peer_handle) = PeerImpl::new(
             mock_broker,
+            handle,
+            token.child_token(),
             mock_sink_builder,
             testcerts::broker_info(),
             Params::default(),
@@ -280,6 +352,8 @@ mod tests {
         // The second call is not subject to waiting as we directly connect to the second peer.
         assert_eq!(duration, Duration::from_secs(0));
 
+        token.cancel();
+        peer_handle.await?;
         Ok(())
     }
 
@@ -314,7 +388,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[test_log::test(tokio::test(start_paused = true))]
     async fn retry_connection() -> anyhow::Result<()> {
         let mut mock_broker = MockBroker::new();
         let mut mock_sink_builder = MockSinkBuilder::<MockSink>::new();
@@ -379,14 +453,27 @@ mod tests {
         mock_broker: MockBroker,
         mock_sink_builder: MockSinkBuilder<MockSink>,
     ) -> anyhow::Result<()> {
-        let peer = PeerImpl::new(
+        let token = CancellationToken::new();
+        let handle = tokio::spawn({
+            let token = token.child_token();
+            async move {
+                token.cancelled().await;
+            }
+        });
+        let token = CancellationToken::new();
+        let (peer, peer_handle) = PeerImpl::new(
             mock_broker,
+            handle,
+            token.child_token(),
             mock_sink_builder,
             testcerts::broker_info(),
             Params::default(),
         );
 
         let chunk = model::Chunk::new(Bytes::copy_from_slice([1, 2, 3].as_ref()), &[]);
-        peer.send(&chunk).await
+        peer.send(&chunk).await?;
+
+        token.cancel();
+        peer_handle.await.context("Peer Handle")
     }
 }

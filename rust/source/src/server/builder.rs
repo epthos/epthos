@@ -99,8 +99,14 @@ impl Builder {
         let connection = self.connection.ok_or(BuilderError::MissingConnection)?;
         let address = self.address.ok_or(BuilderError::MissingAddress)?;
         let broker_info = self.broker.ok_or(BuilderError::MissingBrokerInfo)?;
-        let broker = broker_client::new(&connection, &broker_info).await?;
-        let peer = peer::new(broker, connection.clone());
+        let (broker, broker_handle) =
+            broker_client::new(&connection, &broker_info, self.token.child_token()).await?;
+        let (peer, peer_handle) = peer::new(
+            broker,
+            broker_handle,
+            self.token.child_token(),
+            connection.clone(),
+        );
         let rnd = self.rnd.ok_or(BuilderError::MissingCrypto)?;
         let _source_key = self.source_key.ok_or(BuilderError::MissingCrypto)?;
 
@@ -132,6 +138,7 @@ impl Builder {
             address,
             roots: self.roots,
             _peer: peer,
+            peer_handle,
             filemanager_context: fm_context,
             token: self.token,
             datamanager_handle: dm_handle,
