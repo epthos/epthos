@@ -1,6 +1,7 @@
 //! This module abstracts the work needed to connect to a sink
 //! through the Broker, possibly using a proxy, etc.
 
+use actor::{Async, Tracker};
 use anyhow::{Context, Result};
 use broker_client::{Broker, BrokerImpl, SinkLocation};
 use bytes::Bytes;
@@ -11,11 +12,9 @@ use sink_client::{Sink, SinkBuilder, SinkBuilderImpl};
 use std::marker::PhantomData;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
+    mpsc::{Receiver, Sender},
     oneshot,
 };
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tonic::async_trait;
 
 #[cfg(test)]
@@ -30,20 +29,8 @@ pub trait Peer {
 }
 
 /// Returns a new PeerImpl that will immediately start connecting to a Sink using id as its local identity.
-pub fn new(
-    broker: BrokerImpl,
-    broker_handle: JoinHandle<()>,
-    token: CancellationToken,
-    id: connection::Info,
-) -> (PeerImpl, JoinHandle<()>) {
-    PeerImpl::new(
-        broker,
-        broker_handle,
-        token,
-        SinkBuilderImpl,
-        id,
-        Params::default(),
-    )
+pub fn new(broker: BrokerImpl, id: connection::Info, actors: &mut Tracker) -> PeerImpl {
+    PeerImpl::new(broker, SinkBuilderImpl, id, Params::default(), actors)
 }
 
 /// Default implementation of a Peer.
@@ -64,35 +51,25 @@ impl PeerImpl {
     /// Returns a new Peer, with the given parameters.
     fn new<B, S, K>(
         broker: B,
-        broker_handle: JoinHandle<()>,
-        token: CancellationToken,
         sink_builder: S,
         id: connection::Info,
         params: Params,
-    ) -> (PeerImpl, JoinHandle<()>)
+        actors: &mut Tracker,
+    ) -> PeerImpl
     where
         B: Broker + std::marker::Send + std::marker::Sync + 'static,
         S: SinkBuilder<K> + std::marker::Send + std::marker::Sync + 'static,
         K: Sink + Sized + std::marker::Send + std::marker::Sync + 'static,
     {
-        let (tx, rx) = mpsc::channel(1);
         let actor = PeerActor {
-            rx,
             broker,
-            broker_handle,
-            token,
             sink_builder,
             id,
             params,
             sink: PhantomData,
         };
-        let handle = tokio::spawn(async move {
-            if let Err(err) = actor.run().await {
-                tracing::error!("Peer failed: {:?}", err);
-            }
-        });
-
-        (PeerImpl { tx }, handle)
+        let tx = actors.start(actor, "Peer");
+        PeerImpl { tx }
     }
 }
 
@@ -106,10 +83,7 @@ where
     S: SinkBuilder<K> + std::marker::Send + std::marker::Sync,
     K: Sink + Sized + std::marker::Send + std::marker::Sync,
 {
-    rx: Receiver<PeerOp>,
     broker: B,
-    broker_handle: JoinHandle<()>,
-    token: CancellationToken,
     sink_builder: S,
     params: Params,
     id: connection::Info,
@@ -129,29 +103,26 @@ where
     Done,
 }
 
-impl<B, S, K> PeerActor<B, S, K>
+impl<B, S, K> Async for PeerActor<B, S, K>
 where
     B: Broker + std::marker::Send + std::marker::Sync,
     S: SinkBuilder<K> + std::marker::Send + std::marker::Sync,
     K: Sink + Sized + std::marker::Send + std::marker::Sync,
 {
-    async fn run(mut self) -> anyhow::Result<()> {
+    type Operation = PeerOp;
+
+    async fn run(self, mut rx: Receiver<PeerOp>) -> actor::Result<()> {
         let mut state = ActorState::<K>::Connecting;
         loop {
-            tokio::select! {
-                _ = self.token.cancelled() => {
-                    tracing::debug!("token cancelled");
-                    state = ActorState::Done;
-                }
-                done = &mut self.broker_handle, if !self.token.is_cancelled() => {
-                    tracing::debug!("broker is dead");
-                    self.token.cancel();
-                    done.context("Broker")?;
-                }
-                new = PeerActor::<B, S, K>::next_step(&state, &mut self.rx, &self.params.backoff, &self.broker, &self.sink_builder, &self.id) => {
-                    state = new;
-                }
-            }
+            state = PeerActor::<B, S, K>::next_step(
+                &state,
+                &mut rx,
+                &self.params.backoff,
+                &self.broker,
+                &self.sink_builder,
+                &self.id,
+            )
+            .await;
             if let ActorState::Done = state {
                 tracing::debug!("ActorState Done");
                 break;
@@ -160,7 +131,14 @@ where
         tracing::info!("Shutting done.");
         Ok(())
     }
+}
 
+impl<B, S, K> PeerActor<B, S, K>
+where
+    B: Broker + std::marker::Send + std::marker::Sync,
+    S: SinkBuilder<K> + std::marker::Send + std::marker::Sync,
+    K: Sink + Sized + std::marker::Send + std::marker::Sync,
+{
     async fn next_step(
         state: &ActorState<K>,
         rx: &mut Receiver<PeerOp>,
@@ -282,6 +260,7 @@ mod tests {
     use super::*;
     use broker_client::MockBroker;
     use sink_client::{MockSink, MockSinkBuilder};
+    use tokio_util::sync::CancellationToken;
     use tonic::Status;
 
     #[tokio::test]
@@ -305,13 +284,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn propagate_failure() -> anyhow::Result<()> {
-        let token = CancellationToken::new();
-        let handle = tokio::spawn({
-            let token = token.child_token();
-            async move {
-                token.cancelled().await;
-            }
-        });
         let mut mock_broker = MockBroker::new();
         let mut mock_sink_builder = MockSinkBuilder::<MockSink>::new();
 
@@ -334,13 +306,14 @@ mod tests {
             .withf(move |_, id, addr| id == "sink" && addr == "5.6.7.8")
             .returning(good_sink);
 
-        let (peer, peer_handle) = PeerImpl::new(
+        let token = CancellationToken::new();
+        let mut a = Tracker::new(token.clone());
+        let peer = PeerImpl::new(
             mock_broker,
-            handle,
-            token.child_token(),
             mock_sink_builder,
             testcerts::broker_info(),
             Params::default(),
+            &mut a,
         );
         let chunk = model::Chunk::new(Bytes::copy_from_slice([1, 2, 3].as_ref()), &[]);
 
@@ -353,7 +326,7 @@ mod tests {
         assert_eq!(duration, Duration::from_secs(0));
 
         token.cancel();
-        peer_handle.await?;
+        actor::combine(a.run().await)?;
         Ok(())
     }
 
@@ -454,26 +427,20 @@ mod tests {
         mock_sink_builder: MockSinkBuilder<MockSink>,
     ) -> anyhow::Result<()> {
         let token = CancellationToken::new();
-        let handle = tokio::spawn({
-            let token = token.child_token();
-            async move {
-                token.cancelled().await;
-            }
-        });
-        let token = CancellationToken::new();
-        let (peer, peer_handle) = PeerImpl::new(
+        let mut a = Tracker::new(token.clone());
+        let peer = PeerImpl::new(
             mock_broker,
-            handle,
-            token.child_token(),
             mock_sink_builder,
             testcerts::broker_info(),
             Params::default(),
+            &mut a,
         );
 
         let chunk = model::Chunk::new(Bytes::copy_from_slice([1, 2, 3].as_ref()), &[]);
         peer.send(&chunk).await?;
 
         token.cancel();
-        peer_handle.await.context("Peer Handle")
+        actor::combine(a.run().await)?;
+        Ok(())
     }
 }

@@ -8,6 +8,7 @@ publish = false
 doctest = false
 
 [dependencies]
+actor = { path = "../actor" }
 broker_proto = { path = "../broker_proto" }
 rpcutil = { path = "../rpcutil" }
 settings = { path = "../settings" }

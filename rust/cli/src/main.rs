@@ -230,7 +230,7 @@ async fn status(source: &client::Settings, info: &connection::Info) -> anyhow::R
     stats.sort_by(|a, b| a.0.cmp(&b.0));
     println!("Per state info:");
     for (state, count) in stats {
-        println!("  {}: {}", &state, count);
+        println!("  {}: {}", state, count);
     }
     Ok(())
 }

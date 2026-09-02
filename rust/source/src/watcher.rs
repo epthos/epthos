@@ -1,6 +1,7 @@
 //! The watcher module handles the filesystem side of watching for file
 //! changes.
 
+use actor::{Blocking, Tracker};
 use notify::Event;
 use std::{
     collections::HashSet,
@@ -8,7 +9,7 @@ use std::{
     sync::mpsc::RecvTimeoutError,
     time::Duration,
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Public API of a watcher.
@@ -26,12 +27,12 @@ pub enum Update {
 }
 
 /// Create a watcher which uses the production components (notify-rs, etc)
-pub fn new(token: CancellationToken) -> anyhow::Result<(Box<dyn Watcher + Send>, JoinHandle<()>)> {
+pub fn new(actors: &mut Tracker) -> anyhow::Result<Box<dyn Watcher + Send>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let watcher = Box::new(notify::recommended_watcher(tx)?);
 
-    let (watcher, handle) = WatcherImpl::new(watcher, rx, token);
-    Ok((Box::new(watcher), handle))
+    let watcher = WatcherImpl::new(watcher, rx, actors);
+    Ok(Box::new(watcher))
 }
 
 struct WatcherImpl {
@@ -44,54 +45,62 @@ impl WatcherImpl {
     pub fn new(
         watcher: Box<dyn notify::Watcher + Send>,
         rx: std::sync::mpsc::Receiver<notify::Result<Event>>,
-        token: CancellationToken,
-    ) -> (Self, JoinHandle<()>) {
+        actors: &mut Tracker,
+    ) -> Self {
         let (async_tx, async_rx) = mpsc::channel(1);
-        let handle = tokio::task::spawn_blocking(move || {
-            loop {
-                if token.is_cancelled() {
-                    break;
-                }
-                match rx.recv_timeout(Duration::from_secs(1)) {
-                    Ok(msg) => match msg {
-                        Ok(event) => {
-                            let update = map_update(&event);
-                            tracing::debug!("notify event: {:?} -> {:?}", &event, &update);
-                            if let Some(update) = update
-                                && let Err(err) = async_tx.blocking_send(update)
-                            {
-                                tracing::info!(
-                                    "failed to send from WatcherImpl's copier: {:?}",
-                                    err
-                                );
-                                break;
-                            }
-                        }
-                        Err(err) => {
-                            tracing::info!("notifier failed to return event: {:?}", err);
-                        }
-                    },
-                    Err(RecvTimeoutError::Timeout) => {
-                        // This is fine, just giving a chance to cancel.
-                    }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-            tracing::info!("Shutting down");
-        });
-        (
-            WatcherImpl {
-                roots: HashSet::new(),
-                watcher,
-                async_rx,
-            },
-            handle,
-        )
+        let _tx = actors.start_blocking(Runner { rx, async_tx }, "Watcher");
+        WatcherImpl {
+            roots: HashSet::new(),
+            watcher,
+            async_rx,
+        }
     }
 }
 
+struct Runner {
+    rx: std::sync::mpsc::Receiver<notify::Result<Event>>,
+    async_tx: mpsc::Sender<Update>,
+}
+
+impl Blocking for Runner {
+    type Operation = ();
+
+    fn run(
+        self,
+        _rx: mpsc::Receiver<Self::Operation>,
+        token: CancellationToken,
+    ) -> actor::Result<()> {
+        loop {
+            if token.is_cancelled() {
+                break;
+            }
+            match self.rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(msg) => match msg {
+                    Ok(event) => {
+                        let update = map_update(&event);
+                        tracing::debug!("notify event: {:?} -> {:?}", &event, &update);
+                        if let Some(update) = update
+                            && let Err(err) = self.async_tx.blocking_send(update)
+                        {
+                            tracing::info!("failed to send from WatcherImpl's copier: {:?}", err);
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::info!("notifier failed to return event: {:?}", err);
+                    }
+                },
+                Err(RecvTimeoutError::Timeout) => {
+                    // This is fine, just giving a chance to cancel.
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 // Basic mapping of notify Events to a simpler model.
 //
 // Note in particular that missing files and directories are skipped
@@ -220,8 +229,9 @@ mod test {
         O: AsyncOperation + Send + Sync + 'static,
     {
         let token = CancellationToken::new();
+        let mut a = Tracker::new(token.clone());
 
-        let (mut w, h) = new(token.clone())?;
+        let mut w = new(&mut a)?;
         w.set_roots(&[temp.path()])?;
 
         let mut j = tokio::spawn(operation.execute(temp.path().to_path_buf()));
@@ -251,7 +261,7 @@ mod test {
             }
         }
         token.cancel();
-        h.await?;
+        actor::combine(a.run().await)?;
         Ok(events)
     }
 }

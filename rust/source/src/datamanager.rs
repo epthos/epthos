@@ -1,28 +1,22 @@
 //! The DataManager performs backup creation.
 
 use crate::{
-    bail_fatal,
     chunker::{Address, ChunkMsg, ChunkOp, Chunker, RealChunker},
     datastore::Datastore,
     disk::{self, Disk, Snapshot},
-    fatal::{self, Shutdown},
     filestore::HashUpdate,
     model::{FileHashBuilder, FileMetadata},
-    solo::{self, Solo},
 };
+use actor::{Local, Shutdown, Tracker};
 use anyhow::Context;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
 };
-use tokio::{
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        oneshot,
-    },
-    task::JoinHandle,
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    oneshot,
 };
-use tokio_util::sync::CancellationToken;
 
 /// This is the front API, called by the filemanager to trigger backups
 /// when they are needed. The system defines the pushback mechanism, as
@@ -33,7 +27,7 @@ pub trait DataManager {
     /// Provides the ongoing backups and the receiver for their completion.
     /// This is to be invoked only once at initialization, to restore the
     /// client's internal state.
-    async fn in_flight(&mut self) -> fatal::Result<Vec<InFlight>>;
+    async fn in_flight(&mut self) -> actor::Result<Vec<InFlight>>;
 
     /// Provides the receiver of new backup slots.
     fn backup_slots(&mut self) -> &mut Receiver<Self::Slot>;
@@ -44,7 +38,7 @@ pub trait DataManager {
 pub trait BackupSlot {
     /// Enqueue a backup for the specified path. Upon backup completion (either
     /// successful or not), the oneshot receiver will be triggered with the result.
-    async fn enqueue(self, path: PathBuf) -> fatal::Result<oneshot::Receiver<BackupResult>>;
+    async fn enqueue(self, path: PathBuf) -> actor::Result<oneshot::Receiver<BackupResult>>;
 }
 
 /// Overall result for a backup request. When successful, the hash update matches
@@ -66,18 +60,14 @@ pub struct InFlight {
 
 /// Create a new production data manager operating on the provided
 /// database path.
-pub async fn new(
-    db: &Path,
-    token: CancellationToken,
-) -> anyhow::Result<(DataManagerImpl, JoinHandle<()>)> {
+pub async fn new(db: &Path, actors: &mut Tracker) -> anyhow::Result<DataManagerImpl> {
     let disk = disk::new()?;
-    DataManagerImpl::new(Datastore::new(db)?, disk, token).await
+    DataManagerImpl::new(Datastore::new(db)?, disk, actors).await
 }
 
 // =============================================================================
 
-// The implementation uses the Solo helper to run the single thread with the db
-// interactions following the actor pattern.
+// The actual datamanager actor.
 pub struct DataManagerImpl {
     tx: Sender<Op>,
     slot_rx: Receiver<BackupSlotImpl>,
@@ -87,32 +77,19 @@ impl DataManagerImpl {
     async fn new<D>(
         store: Datastore,
         disk: D,
-        token: CancellationToken,
-    ) -> anyhow::Result<(DataManagerImpl, JoinHandle<()>)>
+        actors: &mut Tracker,
+    ) -> anyhow::Result<DataManagerImpl>
     where
         D: Disk + Clone + Send + 'static,
     {
-        let runner_token = token.clone();
-        let f = move || Runner {
-            store,
-            disk,
-            token: runner_token,
-        };
-        let handle = solo::start(f, "DataManager")?;
+        let f = move || Runner { store, disk };
+        let tx = actors.start_local(f, "DataManager").await;
         // Get ready to receive backup slots from the runner.
         let (slot_tx, slot_rx) = mpsc::channel(1);
-        handle
-            .sender
-            .send(Op::Init((slot_tx, handle.sender.clone())))
+        tx.send(Op::Init((slot_tx, tx.clone())))
             .await
             .context("Runner failed")?;
-        Ok((
-            DataManagerImpl {
-                tx: handle.sender,
-                slot_rx,
-            },
-            handle.handle,
-        ))
+        Ok(DataManagerImpl { tx, slot_rx })
     }
 }
 
@@ -123,7 +100,7 @@ impl DataManager for DataManagerImpl {
         &mut self.slot_rx
     }
 
-    async fn in_flight(&mut self) -> fatal::Result<Vec<InFlight>> {
+    async fn in_flight(&mut self) -> actor::Result<Vec<InFlight>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Op::InFlight(tx)).await.shutdown()?;
         let result = rx.await.shutdown()?;
@@ -148,7 +125,7 @@ pub struct BackupSlotImpl {
 }
 
 impl BackupSlot for BackupSlotImpl {
-    async fn enqueue(self, path: PathBuf) -> fatal::Result<oneshot::Receiver<BackupResult>> {
+    async fn enqueue(self, path: PathBuf) -> actor::Result<oneshot::Receiver<BackupResult>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Op::Enqueue(path, tx)).await.shutdown()?;
         Ok(rx)
@@ -161,7 +138,6 @@ where
 {
     store: Datastore,
     disk: D,
-    token: CancellationToken,
 }
 
 struct PendingBackup {
@@ -170,10 +146,10 @@ struct PendingBackup {
     hash_builder: FileHashBuilder,
 }
 
-impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
+impl<D: Disk + Clone + Send + 'static> Local for Runner<D> {
     type Operation = Op;
 
-    async fn run(self, mut rx: Receiver<Op>) -> fatal::Result<()> {
+    async fn run(self, mut rx: Receiver<Op>) -> actor::Result<()> {
         let chunker = RealChunker::new(self.disk.clone());
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<ChunkOp>(1);
 
@@ -194,7 +170,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                 // Try to hand a backup slot to the caller, if there is capacity.
                 // We use reserve() as selecting on send would lose the message.
                 permit = slot_sender.reserve(), if remaining > 0 => {
-                    let permit = bail_fatal!(permit.shutdown());
+                    let permit = permit.shutdown()?;
                     tracing::debug!("sending one slot");
                     permit.send(BackupSlotImpl { tx: op_sender.clone() });
                     remaining -= 1;
@@ -226,7 +202,7 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                 pending.push_front(PendingBackup{path, tx: bk_tx, hash_builder: FileHashBuilder::new()});
                                 remaining -= 1;
                             }
-                            bail_fatal!(op_tx.send(response).shutdown());
+                            op_tx.send(response).shutdown()?;
                         },
                         // End signal: _all_ senders are gone (incl all slots and
                         // the handler as well).
@@ -254,7 +230,8 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                     md: FileMetadata { fsize, mtime },
                                 };
                                 let result = HashUpdate::Hash(snapshot);
-                                bail_fatal!(p.tx.send(BackupResult { path: p.path, update: result }).shutdown());                                remaining += 1;
+                                p.tx.send(BackupResult { path: p.path, update: result }).shutdown()?;
+                                remaining += 1;
                             } else {
                                 tracing::warn!("Received chunk for unexpected address {:?}", &addr);
                             }
@@ -266,18 +243,14 @@ impl<D: Disk + Clone + Send + 'static> Solo for Runner<D> {
                                 let p = pending.remove(idx).unwrap();
                                 self.store.remove(p.path.clone().into())?;
                                 let result = HashUpdate::Unreadable(err);
-                                bail_fatal!(p.tx.send(BackupResult { path: p.path, update: result }).shutdown());                                remaining += 1;
+                                p.tx.send(BackupResult { path: p.path, update: result }).shutdown()?;
+                                remaining += 1;
                             } else {
                                 tracing::warn!("Received chunk for unexpected address {:?}", &addr);
                             }
                         },
                         None => unreachable!("chunk_tx held by runner"),
                     }
-                }
-                // Orderly shutdown requested.
-                _ = self.token.cancelled() => {
-                    tracing::info!("Shutting down");
-                    break;
                 }
             }
         }
@@ -294,15 +267,17 @@ mod tests {
     use anyhow::{Context, bail};
     use std::{path::PathBuf, time::Duration};
     use tokio::time::sleep;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     #[test_log::test]
     async fn smoke_test() -> anyhow::Result<()> {
         let token = CancellationToken::new();
+        let mut a = Tracker::new(token.clone());
         // Successfully fetch two chunks from a file.
         let ds = Datastore::new_in_memory()?;
         let disk = FakeDisk::new();
-        let (mut dm, handle) = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
+        let mut dm = DataManagerImpl::new(ds, disk.clone(), &mut a).await?;
 
         let slot = dm.backup_slots().recv().await.context("no slot!")?;
         let backup_done = slot.enqueue(PathBuf::from("/a")).await?;
@@ -332,17 +307,19 @@ mod tests {
         assert_eq!(result.path, PathBuf::from("/a"));
 
         token.cancel();
-        handle.await.context("DataManager")
+        actor::combine(a.run().await)?;
+        Ok(())
     }
 
     #[tokio::test]
     #[test_log::test]
     async fn backup_failed() -> anyhow::Result<()> {
         let token = CancellationToken::new();
+        let mut a = Tracker::new(token.clone());
 
         let ds = Datastore::new_in_memory()?;
         let disk = FakeDisk::new();
-        let (mut dm, handle) = DataManagerImpl::new(ds, disk.clone(), token.clone()).await?;
+        let mut dm = DataManagerImpl::new(ds, disk.clone(), &mut a).await?;
 
         // Body of the test. Panics if it times out.
         {
@@ -376,7 +353,7 @@ mod tests {
                 bail!("Unexpected result");
             }
         }
-
-        handle.await.context("DataManager")
+        actor::combine(a.run().await)?;
+        Ok(())
     }
 }

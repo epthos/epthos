@@ -2,17 +2,14 @@
 //! detects changes that need to be backed up.
 
 use crate::{
-    bail_fatal,
     clock::{self, Clock},
     datamanager::{BackupResult, BackupSlot, DataManager, DataManagerImpl},
     disk::{self, Disk},
-    fatal::{self, Shutdown},
     filestore::{Connection, Filestore, HashUpdate, Next, Scanner, Timing},
     model::{FileMetadata, Stats},
-    solo::{self, Solo},
-    watcher,
+    watcher::{self, Watcher},
 };
-use anyhow::Context;
+use actor::{Local, Shutdown, Tracker};
 use std::{
     collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -21,14 +18,10 @@ use std::{
     task::Poll,
     time::{Duration, SystemTime},
 };
-use tokio::{
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        oneshot,
-    },
-    task::JoinHandle,
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    oneshot,
 };
-use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 mod tests;
@@ -39,46 +32,32 @@ pub struct FileManager {
     tx: Sender<Operation>,
 }
 
-pub struct FileManagerContext {
-    pub manager: FileManager,
-    pub handle: JoinHandle<()>,
-}
-
 /// Create a production Manager, using the production store, and
 /// doing full scans at the specified period. The store is single-threaded
 /// and will execute in the context of store_local.
-pub fn new(
+pub async fn new(
     db: &Path,
     rand: crypto::SharedRandom,
     datamanager: DataManagerImpl,
-    token: CancellationToken,
-) -> anyhow::Result<FileManagerContext> {
+    watcher: Box<dyn Watcher + Send>,
+    actors: &mut Tracker,
+) -> anyhow::Result<FileManager> {
     let store = Connection::new(db, rand, Timing::default())?;
     let disk = disk::new()?;
     let clock = clock::new();
-    let (watcher, watcher_handle) = watcher::new(token.child_token())?;
 
-    FileManager::create(
-        store,
-        disk,
-        clock,
-        watcher,
-        watcher_handle,
-        datamanager,
-        token,
-    )
+    FileManager::create(store, disk, clock, watcher, datamanager, actors).await
 }
 
 impl FileManager {
-    fn create<S, D, C, DM>(
+    async fn create<S, D, C, DM>(
         store: S,
         disk: D,
         clock: C,
         watcher: Box<dyn watcher::Watcher + Send>,
-        watcher_handle: JoinHandle<()>,
         datamanager: DM,
-        token: CancellationToken,
-    ) -> anyhow::Result<FileManagerContext>
+        actors: &mut Tracker,
+    ) -> anyhow::Result<FileManager>
     where
         S: Filestore + Send + 'static,
         D: Disk + Send + 'static,
@@ -90,21 +69,16 @@ impl FileManager {
             disk,
             clock,
             watcher,
-            watcher_handle,
             datamanager,
-            token,
         };
-        let handle = solo::start(f, "FileManager")?;
-        Ok(FileManagerContext {
-            manager: FileManager { tx: handle.sender },
-            handle: handle.handle,
-        })
+        let tx = actors.start_local(f, "FileManager").await;
+        Ok(FileManager { tx })
     }
 
     // set_roots() will update the roots for file scanning. The updated value will be used
     // as soon as possible.
     #[tracing::instrument(skip(self))]
-    pub async fn set_roots(&self, roots: Vec<PathBuf>) -> fatal::Result<()> {
+    pub async fn set_roots(&self, roots: Vec<PathBuf>) -> actor::Result<()> {
         let (tx, mut rx) = mpsc::channel::<anyhow::Result<()>>(1);
         let op = Operation::SetRoots(roots, tx);
         self.tx.send(op).await.shutdown()?;
@@ -113,7 +87,7 @@ impl FileManager {
     }
 
     #[allow(dead_code)] // TODO: use it!
-    pub async fn get_stats(&self) -> fatal::Result<Stats> {
+    pub async fn get_stats(&self) -> actor::Result<Stats> {
         let (tx, rx) = oneshot::channel::<anyhow::Result<Stats>>();
         self.tx.send(Operation::GetStats(tx)).await.shutdown()?;
         let stats = rx.await.shutdown()??;
@@ -142,17 +116,15 @@ where
     disk: D,
     clock: C,
     watcher: Box<dyn watcher::Watcher + Send>,
-    watcher_handle: JoinHandle<()>,
     datamanager: DM,
-    token: CancellationToken,
 }
 
 // The agent side of the manager. Holds the mutable store and watcher, and
 // performs the dispatching logic.
-impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, DM> {
+impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Local for Runner<S, D, C, DM> {
     type Operation = Operation;
 
-    async fn run(mut self, mut rx: Receiver<Operation>) -> fatal::Result<()> {
+    async fn run(mut self, mut rx: Receiver<Operation>) -> actor::Result<()> {
         // Backups currently in flight in the datamanager.
         let mut inflight_backups = self.sync_inflight_backups().await?;
         let mut backup_slots: VecDeque<DM::Slot> = VecDeque::new();
@@ -184,17 +156,15 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                 now,
                 &mut op_stat.hash,
             )?;
-            let backup_delay = bail_fatal!(
-                Runner::<S, D, C, DM>::next_backup(
-                    &self.clock,
-                    &mut self.store,
-                    now,
-                    &mut backup_slots,
-                    &mut inflight_backups,
-                    &mut op_stat.backup_start,
-                )
-                .await
-            );
+            let backup_delay = Runner::<S, D, C, DM>::next_backup(
+                &self.clock,
+                &mut self.store,
+                now,
+                &mut backup_slots,
+                &mut inflight_backups,
+                &mut op_stat.backup_start,
+            )
+            .await?;
             let scan_delay = Runner::<S, D, C, DM>::next_scan(
                 &self.disk,
                 &self.clock,
@@ -204,18 +174,6 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
             )?;
 
             tokio::select! {
-                // Cancellations management.
-                _ = self.token.cancelled() => {
-                    tracing::info!("Shutting down");
-                    break;
-                }
-                // Avoid re-polling if we already cancelled, as this causes a panic.
-                watcher_result = &mut self.watcher_handle, if !self.token.is_cancelled() => {
-                    tracing::debug!("Watch Handle completed, shutting down");
-                    self.token.cancel();
-                    watcher_result.context("Watcher")?;
-                }
-
                 // Unblock if any action can be taken right away.
                 _ = hash_delay => {}
                 _ = backup_delay => {}
@@ -242,7 +200,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Solo for Runner<S, D, C, 
                     self.store.backup_done(done.path, self.clock.now(), done.update)?;
                 }
                 slot = self.datamanager.backup_slots().recv() => {
-                    let slot = bail_fatal!(slot.shutdown());
+                    let slot = slot.shutdown()?;
                     op_stat.backup_slot += 1;
                     backup_slots.push_back(slot);
                 },
@@ -321,7 +279,7 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Runner<S, D, C, DM> {
         backup_slots: &mut VecDeque<DM::Slot>,
         inflight_backups: &mut VecFutures<BackupResult>,
         op_stat: &mut u64,
-    ) -> fatal::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
+    ) -> actor::Result<impl Future<Output = ()> + use<'b, S, D, C, DM>> {
         const NAME: &str = "backup";
         if backup_slots.is_empty() {
             // No open backup slot? Wait "forever".

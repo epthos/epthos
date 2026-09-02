@@ -8,12 +8,10 @@ mod clock;
 mod datamanager;
 mod datastore;
 mod disk;
-mod fatal;
 mod filemanager;
 mod filestore;
 mod model;
 mod server;
-mod solo;
 mod sql_model;
 mod watcher;
 

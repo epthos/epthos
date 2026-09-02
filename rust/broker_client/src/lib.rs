@@ -1,3 +1,4 @@
+use actor::Tracker;
 use anyhow::Context;
 use broker_proto::{CheckinReply, CheckinRequest, broker_client::BrokerClient};
 use mockall::automock;
@@ -5,9 +6,8 @@ use rpcutil::{Backoff, ExpBackoff};
 use settings::{client, connection};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tonic::async_trait;
 use tonic::transport::{Channel, ClientTlsConfig};
 
@@ -35,8 +35,8 @@ pub struct SinkLocation {
 pub async fn new(
     client: &connection::Info,
     server: &client::Settings,
-    token: CancellationToken,
-) -> anyhow::Result<(BrokerImpl, JoinHandle<()>)> {
+    actors: &mut Tracker,
+) -> anyhow::Result<BrokerImpl> {
     let tls = ClientTlsConfig::new()
         .domain_name(server.name())
         .ca_certificate(client.peer_root().clone())
@@ -47,7 +47,7 @@ pub async fn new(
         .tls_config(tls.clone())?
         .connect_lazy();
 
-    BrokerImpl::new_impl(channel, Params::default(), token).await
+    Ok(BrokerImpl::new_impl(channel, Params::default(), actors))
 }
 
 /// Broker client. Used by all the peers to communicate their current state.
@@ -97,13 +97,13 @@ enum BrokerOps {
 
 struct BrokerActor {
     stub: BrokerClient<Channel>,
-    rx: mpsc::Receiver<BrokerOps>,
     params: Params,
-    token: CancellationToken,
 }
 
-impl BrokerActor {
-    async fn run(&mut self) -> anyhow::Result<()> {
+impl actor::Async for BrokerActor {
+    type Operation = BrokerOps;
+
+    async fn run(mut self, mut rx: Receiver<Self::Operation>) -> actor::Result<()> {
         let mut checkin_delay = Duration::ZERO;
         let mut backoff = self.params.backoff.clone();
         let mut checkin_data = CheckinRequest::default();
@@ -116,8 +116,7 @@ impl BrokerActor {
             // TODO: make the wait an absolute time, so that if we get interrupted with new checkin data
             // we don't postpone forever.
             tokio::select! {
-                _ = self.token.cancelled() => { break 'actor; }
-                req = self.rx.recv() => {
+                req = rx.recv() => {
                     match req {
                         Some(BrokerOps::SetAddresses(req, reply)) => {
                             checkin_data = req;
@@ -160,26 +159,14 @@ impl BrokerActor {
 }
 
 impl BrokerImpl {
-    async fn new_impl(
-        channel: Channel,
-        params: Params,
-        token: CancellationToken,
-    ) -> anyhow::Result<(Self, JoinHandle<()>)> {
-        let (tx, rx) = mpsc::channel(1);
+    fn new_impl(channel: Channel, params: Params, actors: &mut Tracker) -> Self {
+        let actor = BrokerActor {
+            stub: BrokerClient::new(channel),
+            params,
+        };
+        let tx = actors.start(actor, "Broker");
 
-        let handle = tokio::spawn(async move {
-            let mut actor = BrokerActor {
-                stub: BrokerClient::new(channel),
-                rx,
-                params,
-                token,
-            };
-            if let Err(err) = actor.run().await {
-                panic!("Broker client failed: {:?}", err);
-            }
-        });
-
-        Ok((BrokerImpl { tx }, handle))
+        BrokerImpl { tx }
     }
 }
 
@@ -207,6 +194,7 @@ mod test {
 
     use broker_proto::broker_server;
     use rpcutil::testing::{self, CannedResponses, tracking_sleeper};
+    use tokio_util::sync::CancellationToken;
     use tonic::{Request, Response, Status};
 
     use broker_proto::CheckinReply;
@@ -215,7 +203,7 @@ mod test {
 
     #[tokio::test]
     async fn client_handles_delays() -> anyhow::Result<()> {
-        let token = CancellationToken::new();
+        let mut a = Tracker::new(CancellationToken::new());
         // Configure the server to send first an error (which causes an exponential backoff)
         // followed by a response so we can confirm we use the next_checkin recommendation.
         let mock_broker = Canned {
@@ -241,9 +229,8 @@ mod test {
                 }),
                 sleep: tracking_sleeper(tx),
             },
-            token,
-        )
-        .await?;
+            &mut a,
+        );
 
         // We begin with two internal delays, as the first response from the Broker is an
         // error and did not return anything to the client.

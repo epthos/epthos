@@ -2,3 +2,5 @@
 /crypto/target/
 # Top-level binaries
 /target/
+# Temporary diff/merge files
+*.orig

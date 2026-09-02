@@ -15,6 +15,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 use test_log::test;
+use tokio_util::sync::CancellationToken;
 
 // Have one file dirty, with next set at +5.
 // Send a metadata update within that time, with
@@ -24,64 +25,62 @@ use test_log::test;
 
 #[test(tokio::test)]
 async fn wait_for_tree_scan() -> anyhow::Result<()> {
-    let (manager_ctx, _store, clock, _tx, token) =
-        test_manager(WatcherState::default(), FileStoreState::default());
+    let t = CancellationToken::new();
+    let mut a = Tracker::new(t.clone());
+    let (_fm, _store, clock, _tx) =
+        test_manager(WatcherState::default(), FileStoreState::default(), &mut a).await;
 
     // Not a very deep test: we just confirm that when there is nothing
     // to scan, we wait until the next round.
     let delay = clock.wait("tree_scan", 1).await;
     assert_eq!(delay, Duration::ZERO); // it's UNIX_EPOCH and we scan next then.
 
-    shutdown(token, manager_ctx.handle).await
+    t.cancel();
+    actor::combine(a.run().await)?;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn detect_rescans_needed() -> anyhow::Result<()> {
+    let token = CancellationToken::new();
+    let mut a = Tracker::new(token.clone());
     let mut store = FileStoreState::default();
     // Convince the manager to avoid running a scan right away after
     // the first one.
     store.next_scan = t(10);
 
-    let (manager_ctx, store_state, clock, _tx, token) =
-        test_manager(WatcherState::default(), store);
+    let (fm, store_state, clock, _tx) = test_manager(WatcherState::default(), store, &mut a).await;
 
-    manager_ctx
-        .manager
-        .set_roots(vec![Path::new("/a").into()])
-        .await?;
+    fm.set_roots(vec![Path::new("/a").into()]).await?;
     clock.wait("tree_scan", 1).await;
     let sc1 = store_state.lock().unwrap().scan_round;
 
-    manager_ctx
-        .manager
-        .set_roots(vec![Path::new("/a").into()])
-        .await?;
+    fm.set_roots(vec![Path::new("/a").into()]).await?;
     clock.wait("tree_scan", 2).await;
     let sc2 = store_state.lock().unwrap().scan_round;
 
-    manager_ctx
-        .manager
-        .set_roots(vec![Path::new("/b").into()])
-        .await?;
+    fm.set_roots(vec![Path::new("/b").into()]).await?;
     clock.wait("tree_scan", 3).await;
     let sc3 = store_state.lock().unwrap().scan_round;
 
     assert_eq!(sc1, sc2); // no new scan
     assert_ne!(sc2, sc3); // new root -> new scan.
 
-    shutdown(token, manager_ctx.handle).await
+    token.cancel();
+    actor::combine(a.run().await)?;
+    Ok(())
 }
 
 #[test(tokio::test)]
 async fn set_roots() -> anyhow::Result<()> {
-    let (manager_ctx, store_state, _clock, _tx, token) =
-        test_manager(WatcherState::default(), FileStoreState::default());
+    let t = CancellationToken::new();
+    let mut a = Tracker::new(t.clone());
+    let (fm, store_state, _clock, _tx) =
+        test_manager(WatcherState::default(), FileStoreState::default(), &mut a).await;
 
-    manager_ctx
-        .manager
-        .set_roots(vec![Path::new("/a").into()])
-        .await?;
-    shutdown(token, manager_ctx.handle).await?;
+    fm.set_roots(vec![Path::new("/a").into()]).await?;
+    t.cancel();
+    actor::combine(a.run().await)?;
 
     let inner = store_state.lock().unwrap();
     assert_eq!(inner.roots, vec![Path::new("/a")]);
@@ -91,56 +90,55 @@ async fn set_roots() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn recover_from_missing_in_flights() -> anyhow::Result<()> {
-    let (manager_ctx, _store_state, _clock, _tx, token) =
-        test_manager(WatcherState::default(), FileStoreState::default());
+    let t = CancellationToken::new();
+    let mut a = Tracker::new(t.clone());
+    let (_fm, _store, _clock, _tx) =
+        test_manager(WatcherState::default(), FileStoreState::default(), &mut a).await;
 
     // TODO: When the file manager starts, it syncs the in-flight backups with
     // the ones known to the data manager. This test is for backups that
     // we think should be ongoing but are not. In those cases, we turn the
     // file back to dirty, so it gets picked up later again.
 
-    shutdown(token, manager_ctx.handle).await
+    t.cancel();
+    actor::combine(a.run().await)?;
+    Ok(())
 }
 
 // ---------------------- helpers -----------------------
 
 /// Creates a test manager with fake watcher and store states that can be
 /// controlled by the test.
-fn test_manager(
+async fn test_manager(
     watcher_state: WatcherState,
     store_state: FileStoreState,
+    actors: &mut Tracker,
 ) -> (
-    FileManagerContext,
+    FileManager,
     Arc<Mutex<FileStoreState>>,
     Handler,
     Sender<watcher::Update>,
-    CancellationToken,
 ) {
     let watcher_state = Arc::new(Mutex::new(watcher_state));
     let store_state = Arc::new(Mutex::new(store_state));
     let (clock, clock_state) = Handler::new();
     let (tx, rx) = mpsc::channel(1);
     let (backup_tx, backup_rx) = mpsc::channel(1);
-    let token = CancellationToken::new();
-    let watcher_token = token.clone();
-    let watcher_handle = tokio::task::spawn(async move {
-        watcher_token.cancelled().await;
-    });
     let manager = FileManager::create(
         FakeFileStore::new(store_state.clone()),
         FakeDisk::new(),
         clock,
         Box::new(FakeWatcher::new(watcher_state.clone(), rx)),
-        watcher_handle,
         FakeDataManager {
             _tx: backup_tx,
             rx: backup_rx,
         },
-        token.clone(),
+        actors,
     )
+    .await
     .unwrap();
 
-    (manager, store_state, clock_state, tx, token)
+    (manager, store_state, clock_state, tx)
 }
 
 struct FakeDataManager {
@@ -157,13 +155,13 @@ impl DataManager for FakeDataManager {
         &mut self.rx
     }
 
-    async fn in_flight(&mut self) -> fatal::Result<Vec<InFlight>> {
+    async fn in_flight(&mut self) -> actor::Result<Vec<InFlight>> {
         Ok(vec![])
     }
 }
 
 impl BackupSlot for FakeSlot {
-    async fn enqueue(self, _path: PathBuf) -> fatal::Result<oneshot::Receiver<BackupResult>> {
+    async fn enqueue(self, _path: PathBuf) -> actor::Result<oneshot::Receiver<BackupResult>> {
         todo!()
     }
 }
@@ -328,9 +326,4 @@ impl filestore::Scanner for FakeUpdater {
 
 fn t(s: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(s)
-}
-
-async fn shutdown(token: CancellationToken, handle: JoinHandle<()>) -> anyhow::Result<()> {
-    token.cancel();
-    handle.await.context("thread failed")
 }

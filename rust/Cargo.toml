@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "actor",
     "broker",
     "broker_client",
     "broker_proto",

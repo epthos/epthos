@@ -9,6 +9,7 @@ name = "source"
 path = "src/main.rs"
 
 [dependencies]
+actor = {path = "../actor"}
 broker_client = {path = "../broker_client"}
 crypto = {path = "../crypto"}
 platform = {path = "../platform"}
@@ -22,7 +23,6 @@ storage = {path = "../storage"}
 anyhow = "1"
 async-trait = "0"
 bytes = "1"
-error-collection = "1"
 notify = "8"
 rand = "0"
 ring = "0"

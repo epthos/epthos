@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use actor::{Tracker, router::Actor};
+use anyhow::Result;
 use broker_client::Broker;
-use error_collection::Errors;
 use rpcutil::auth::{self, AuthInterceptor};
 use settings::{client, connection};
 use sink_proto::{
@@ -90,10 +90,8 @@ impl Server {
     }
 
     pub async fn serve(&self) -> anyhow::Result<()> {
-        let (mut broker, mut broker_handle) =
-            broker_client::new(&self.connection, &self.broker, self.token.child_token())
-                .await
-                .context("Failed to start the Broker")?;
+        let mut actors = Tracker::new(self.token.clone());
+        let mut broker = broker_client::new(&self.connection, &self.broker, &mut actors).await?;
 
         // Resolve the port we will listen on if it's not specified.
         // This is prone to race conditions in theory, not sure about practice.
@@ -129,35 +127,8 @@ impl Server {
             )?
             .add_service(svc);
 
-        let mut server =
-            Box::pin(server.serve_with_shutdown(addr, self.token.child_token().cancelled_owned()));
-
-        let mut server_result = None;
-        let mut broker_result = None;
-        tokio::select! {
-            r = &mut server => {
-                tracing::info!("Server stopped");
-                self.token.cancel();
-                server_result = Some(r.context("SinkImpl"));
-            }
-            r = &mut broker_handle => {
-                tracing::info!("Broker stopped");
-                self.token.cancel();
-                broker_result = Some(r);
-            }
-        }
-
-        if server_result.is_none() {
-            server_result = Some(server.await.context("SinkImpl"));
-        }
-        if broker_result.is_none() {
-            broker_result = Some(broker_handle.await);
-        }
-        let mut errors = Errors::new();
-        errors.collect(server_result.unwrap());
-        errors.collect(broker_result.unwrap());
-
-        errors.as_result()
+        actors.start(Actor::new(addr, server), "Server");
+        actor::combine(actors.run().await)
     }
 }
 

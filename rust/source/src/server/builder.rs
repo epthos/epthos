@@ -1,10 +1,4 @@
-use super::{Server, peer};
-use crate::{
-    datamanager,
-    filemanager::{self, FileManagerContext},
-};
-use anyhow::Context;
-use error_collection::Errors;
+use super::Server;
 use settings::{client, connection};
 use source_settings::Settings;
 use std::{
@@ -95,53 +89,23 @@ impl Builder {
         self
     }
 
-    pub async fn build(self) -> Result<Server<peer::PeerImpl>, BuilderError> {
+    pub async fn build(self) -> Result<Server, BuilderError> {
+        // "Building" the server here means ensuring all the required fields have been provided
+        // and are valid. All the actor management is done when the server actually starts.
         let connection = self.connection.ok_or(BuilderError::MissingConnection)?;
         let address = self.address.ok_or(BuilderError::MissingAddress)?;
         let broker_info = self.broker.ok_or(BuilderError::MissingBrokerInfo)?;
-        let (broker, broker_handle) =
-            broker_client::new(&connection, &broker_info, self.token.child_token()).await?;
-        let (peer, peer_handle) = peer::new(
-            broker,
-            broker_handle,
-            self.token.child_token(),
-            connection.clone(),
-        );
         let rnd = self.rnd.ok_or(BuilderError::MissingCrypto)?;
         let _source_key = self.source_key.ok_or(BuilderError::MissingCrypto)?;
-
-        // -- The following structs require an explicit shutdown ---
-
-        // Use a child token so the datamanager can't cancel the rest
-        // unilaterally.
-        let (dm, dm_handle) = datamanager::new(&self.datastore, self.token.child_token())
-            .await
-            .context("failed to create DataManager")?;
-        let fm_context = match filemanager::new(&self.filestore, rnd, dm, self.token.child_token())
-            .context("Failed to create FileManager")
-        {
-            Ok(fm) => fm,
-            Err(e) => {
-                self.token.cancel();
-
-                let mut errors = Errors::new();
-                errors.collect(dm_handle.await);
-                errors.collect::<FileManagerContext, anyhow::Error>(Err(e));
-
-                return Err(BuilderError::UnknownError(
-                    errors.as_result().context("Builder failed").unwrap_err(),
-                ));
-            }
-        };
         Ok(Server {
             connection,
+            broker_info,
             address,
             roots: self.roots,
-            _peer: peer,
-            peer_handle,
-            filemanager_context: fm_context,
+            rnd,
+            datastore_path: self.datastore,
+            filestore_path: self.filestore,
             token: self.token,
-            datamanager_handle: dm_handle,
         })
     }
 }
