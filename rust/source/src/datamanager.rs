@@ -5,7 +5,7 @@ use crate::{
     datastore::Datastore,
     disk::{self, Disk, Snapshot},
     filestore::HashUpdate,
-    model::{FileHashBuilder, FileMetadata},
+    model::FileHashBuilder,
 };
 use actor::{Local, Shutdown, Tracker};
 use anyhow::Context;
@@ -220,14 +220,14 @@ impl<D: Disk + Clone + Send + 'static> Local for Runner<D> {
                             }
                         },
                         // File is fully chunked.
-                        Some(ChunkOp { address: addr, msg: ChunkMsg::Done(fsize, mtime) }) => {
+                        Some(ChunkOp { address: addr, msg: ChunkMsg::Done(md) }) => {
                             tracing::debug!("done chunking {:?}", addr.file);
                             if let Some(idx) = pending.iter().position(|p| p.path == addr.file) {
                                 let p = pending.remove(idx).unwrap();
                                 self.store.remove(p.path.clone().into())?;
                                 let snapshot = Snapshot {
                                     hash: p.hash_builder.finish(),
-                                    md: FileMetadata { fsize, mtime },
+                                    md,
                                 };
                                 let result = HashUpdate::Hash(snapshot);
                                 p.tx.send(BackupResult { path: p.path, update: result }).shutdown()?;

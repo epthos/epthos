@@ -13,9 +13,9 @@ use std::{
 mod test;
 
 #[derive(Clone)]
-pub struct RealDisk {}
+pub struct Disk {}
 
-impl Disk for RealDisk {
+impl super::Disk for Disk {
     fn scan(&self, path: &Path) -> Result<impl Iterator<Item = Result<ScanEntry>>> {
         let entries = std::fs::read_dir(path).disk(path, "read_dir")?;
         Ok(ScanIterator {
@@ -24,9 +24,12 @@ impl Disk for RealDisk {
         })
     }
 
-    fn metadata(&self, path: &Path) -> Result<(FileSize, ModificationTime)> {
+    fn metadata(&self, path: &Path) -> Result<FileMetadata> {
         let md = fs::metadata(path).disk(path, "metadata")?;
-        Ok((md.len(), md.modified().disk(path, "modified")?))
+        Ok(FileMetadata {
+            fsize: md.len(),
+            mtime: md.modified().disk(path, "modified")?,
+        })
     }
 
     fn chunk(&self, path: &Path, offset: usize) -> Result<impl Iterator<Item = Result<Chunk>>> {

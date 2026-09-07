@@ -1,5 +1,5 @@
 //! Abstracted disk operations.
-use crate::model::{Chunk, FileHash, FileHashBuilder, FileMetadata, FileSize, ModificationTime};
+use crate::model::{Chunk, FileHash, FileHashBuilder, FileMetadata};
 use std::{
     ffi::OsString,
     io::{ErrorKind, Read},
@@ -7,7 +7,7 @@ use std::{
 };
 use thiserror::Error;
 
-mod real;
+mod localfs;
 
 /// High-level disk operations. They map directly to what the rest of the
 /// system needs.
@@ -16,7 +16,7 @@ pub trait Disk {
     fn scan(&self, path: &Path) -> Result<impl Iterator<Item = Result<ScanEntry>>>;
 
     /// Fetch the metadata for a file.
-    fn metadata(&self, path: &Path) -> Result<(FileSize, ModificationTime)>;
+    fn metadata(&self, path: &Path) -> Result<FileMetadata>;
 
     /// Slice a file into a sequence of chunks, starting at |offset|.
     /// The chunks can't be more than CHUNK_SIZE bytes, but can be much shorter if
@@ -39,7 +39,7 @@ pub enum ScanEntry {
 
 /// Snapshot a file, incl metadata and contents, using the Disk abstractions.
 pub fn snapshot<D: Disk>(disk: &D, path: &Path) -> Result<Snapshot> {
-    let (fsize, mtime) = disk.metadata(path)?;
+    let md = disk.metadata(path)?;
 
     let mut file_hash = FileHashBuilder::new();
     for chunk in disk.chunk(path, 0)? {
@@ -48,13 +48,13 @@ pub fn snapshot<D: Disk>(disk: &D, path: &Path) -> Result<Snapshot> {
 
     Ok(Snapshot {
         hash: file_hash.finish(),
-        md: FileMetadata { fsize, mtime },
+        md,
     })
 }
 
 /// Create a new instance of the production Disk trait.
 pub fn new() -> anyhow::Result<impl Disk + Clone + Send> {
-    Ok(real::RealDisk {})
+    Ok(localfs::Disk {})
 }
 
 /// Errors specific to this module.

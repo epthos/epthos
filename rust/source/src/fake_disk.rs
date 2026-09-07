@@ -1,6 +1,6 @@
 use crate::{
     disk::{Disk, Result, ScanEntry},
-    model::{Chunk, FileSize, ModificationTime},
+    model::{Chunk, FileMetadata, ModificationTime},
 };
 use std::{
     path::{Path, PathBuf},
@@ -60,8 +60,11 @@ impl Disk for FakeDisk {
         Ok(FakeScanIterator {})
     }
 
-    fn metadata(&self, _path: &Path) -> Result<(FileSize, ModificationTime)> {
-        Ok((0, ModificationTime::UNIX_EPOCH))
+    fn metadata(&self, _path: &Path) -> Result<FileMetadata> {
+        Ok(FileMetadata {
+            fsize: 0,
+            mtime: ModificationTime::UNIX_EPOCH,
+        })
     }
 
     fn chunk(&self, path: &Path, _offset: usize) -> Result<impl Iterator<Item = Result<Chunk>>> {

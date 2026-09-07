@@ -6,7 +6,7 @@ use crate::{
     datamanager::{BackupResult, BackupSlot, DataManager, DataManagerImpl},
     disk::{self, Disk},
     filestore::{Connection, Filestore, HashUpdate, Next, Scanner, Timing},
-    model::{FileMetadata, Stats},
+    model::Stats,
     watcher::{self, Watcher},
 };
 use actor::{Local, Shutdown, Tracker};
@@ -217,9 +217,8 @@ impl<S: Filestore, D: Disk, C: Clock, DM: DataManager> Local for Runner<S, D, C,
                         // Directory changes are not supported, we'll rely on the tree scan.
                         Some(watcher::Update::Directory(_)) => {},
                         Some(watcher::Update::File(path)) => {
-                            if let Ok((fsize, mtime)) = self.disk.metadata(&path) {
-                                self.store
-                                    .metadata_update(path, now, FileMetadata { fsize, mtime })?;
+                            if let Ok(md) = self.disk.metadata(&path) {
+                                self.store.metadata_update(path, now, md)?;
                             }
                         },
                     }

@@ -4,7 +4,7 @@
 
 use crate::{
     disk::{self, Disk},
-    model::{Chunk, FileSize, ModificationTime},
+    model::{Chunk, FileMetadata},
 };
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -22,7 +22,7 @@ pub struct ChunkOp {
 
 pub enum ChunkMsg {
     Next(Chunk),
-    Done(FileSize, ModificationTime),
+    Done(FileMetadata),
     Error(disk::DiskError),
 }
 
@@ -34,6 +34,8 @@ pub trait Chunker {
     /// mpsc channel.
     fn chunk(&self, address: Address, tx: mpsc::Sender<ChunkOp>);
 }
+
+// -----------------------------------------------------
 
 pub struct RealChunker<D: Disk + Clone> {
     disk: D,
@@ -107,7 +109,7 @@ where
                 )?;
             }
             // Step 3: finalize the chunking by returning the latest file metadata.
-            let (fsize, mtime) = match disk.metadata(&file_path) {
+            let md = match disk.metadata(&file_path) {
                 Ok(m) => m,
                 Err(err) => {
                     return try_send(
@@ -129,7 +131,7 @@ where
                         file: address.file,
                         offset,
                     },
-                    msg: ChunkMsg::Done(fsize, mtime),
+                    msg: ChunkMsg::Done(md),
                 },
             )
         });
