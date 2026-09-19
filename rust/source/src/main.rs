@@ -1,5 +1,6 @@
 use ::settings::process;
 use anyhow::{Context, Result};
+use clap::Parser;
 use std::{path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -21,8 +22,13 @@ mod fake_clock;
 mod fake_disk;
 
 // Get access to static build information so we can log it.
-// This imports release::HUMAN_READABLE.
+// This imports release_info::RELEASE.
 include!(concat!(env!("OUT_DIR"), "/built_info.rs"));
+
+/// Command-line arguments of the Source binary.
+#[derive(Parser, Debug)]
+#[command(version = crate::release_info::RELEASE, about, long_about = None)]
+struct Args {}
 
 // Creates a new Source key and saves it to the specified path.
 fn new_source(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::key::Durable> {
@@ -34,9 +40,12 @@ fn new_source(path: &Path, rnd: &crypto::Random) -> anyhow::Result<crypto::key::
 /// Runs a Source binary, which is in charge of a user's data source.
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parsing handles --version and --help, and exits for those.
+    Args::parse();
+
     let settings = source_settings::load().context("Failed to load the Source settings")?;
     process::init(settings.process())?;
-    tracing::info!("Starting {}", release_info::HUMAN_READABLE);
+    tracing::info!("Starting EpthosSource {}", release_info::RELEASE);
 
     let rnd = Arc::new(crypto::Random::new());
     // TODO: we should be very conservative about regenerating the key, in case something requires
