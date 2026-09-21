@@ -370,7 +370,7 @@ trait Castable {
 
 // Helper type which keeps both an owned buffer and the pointer type
 // it's expected to be seen as.
-struct Tow<O: windows_core::Free, P> {
+struct Tow<O: windows::core::Free, P> {
     _owner: Owned<O>,
     pointer: P,
 }
@@ -385,7 +385,7 @@ impl<P: Castable> Tow<HLOCAL, P> {
     }
 }
 
-impl<O: windows_core::Free, P> Tow<O, P> {
+impl<O: windows::core::Free, P> Tow<O, P> {
     /// Build a Tow from a pointer and a buffer. The pointer must be
     /// in the buffer, but not necessarily at the beginning.
     ///
@@ -399,7 +399,7 @@ impl<O: windows_core::Free, P> Tow<O, P> {
     }
 }
 
-impl<O: windows_core::Free, T> std::ops::Deref for Tow<O, T> {
+impl<O: windows::core::Free, T> std::ops::Deref for Tow<O, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
