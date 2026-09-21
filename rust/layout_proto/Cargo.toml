@@ -12,6 +12,7 @@ prost = "0"
 tonic = "0"
 
 [build-dependencies]
+protoc_bin = { path = "../protoc_bin" }
 tonic-prost-build = "0"
 
 [package.metadata.cargo-machete]

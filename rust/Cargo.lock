@@ -268,6 +268,7 @@ name = "broker_proto"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "protoc_bin",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -607,6 +608,7 @@ name = "data_proto"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "protoc_bin",
  "tonic",
  "tonic-prost-build",
 ]
@@ -1270,6 +1272,7 @@ name = "layout_proto"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "protoc_bin",
  "tonic",
  "tonic-prost-build",
 ]
@@ -1806,6 +1809,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "protoc_bin"
+version = "0.1.0"
+
+[[package]]
 name = "pulldown-cmark"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2211,6 +2218,7 @@ name = "sink_proto"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "protoc_bin",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -2303,6 +2311,7 @@ name = "source_proto"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "protoc_bin",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

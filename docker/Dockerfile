@@ -10,9 +10,6 @@ FROM rust:${RUST_VERSION}-bookworm AS build
 ARG APP_NAME
 WORKDIR /build
 
-# Install host build dependencies.
-RUN apt-get update && apt-get install -y protobuf-compiler
-
 # Build the application.
 # Leverage a cache mount to /usr/local/cargo/registry/
 # for downloaded dependencies, a cache mount to /usr/local/cargo/git/db
