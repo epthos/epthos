@@ -1,10 +1,19 @@
-use chrono::SubsecRound;
 use std::{path::PathBuf, process::Command};
 
 // Generate static build information for introspection.
 fn main() -> anyhow::Result<()> {
+    // Rebuild whenever the commit or branch changes, so RELEASE stays fresh.
+    let git_dir = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .output()?
+            .stdout,
+    )?;
+    let git_dir = git_dir.trim();
+    println!("cargo:rerun-if-changed={git_dir}/HEAD");
+    println!("cargo:rerun-if-changed={git_dir}/refs");
+
     let version = env!("CARGO_PKG_VERSION");
-    let timestamp = chrono::Utc::now().round_subsecs(0).to_rfc3339();
     let sha = String::from_utf8(
         Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -13,8 +22,10 @@ fn main() -> anyhow::Result<()> {
     )?;
     let short_sha = sha.trim();
 
-    // Build a friendly release string from the metadata.
-    let release = format!("EpthosSource v{version} (built on {timestamp} from SHA:{short_sha})");
+    // Build a friendly release string from the metadata. RELEASE omits the
+    // binary name, as --version already prefixes it. No timestamp, so the
+    // build is repeatable given the same source and version.
+    let release = format!("v{version} (SHA:{short_sha})");
     let out_dir: PathBuf = std::env::var("OUT_DIR")?.into();
     std::fs::write(
         out_dir.join("built_info.rs"),
@@ -22,10 +33,9 @@ fn main() -> anyhow::Result<()> {
             r#"
 mod release_info {{
 // Compile-time release identifier
-pub const HUMAN_READABLE: &str = "{}";
+pub const RELEASE: &str = "{release}";
 }}
-"#,
-            release
+"#
         ),
     )?;
     Ok(())
